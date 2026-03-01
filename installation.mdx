@@ -1,0 +1,415 @@
+---
+title: Installation
+description: Install Hinbox and set up your environment
+---
+
+Hinbox requires Python 3.12+ and uses `uv` for dependency management. This guide will walk you through the complete installation process.
+
+## Prerequisites
+
+Before installing Hinbox, ensure you have the following:
+
+<Steps>
+  <Step title="Python 3.12 or higher">
+    Check your Python version:
+
+    ```bash
+    python --version
+    ```
+
+    If you need to install or upgrade Python, visit [python.org](https://www.python.org/downloads/) or use your system package manager.
+  </Step>
+
+  <Step title="uv package manager">
+    Install `uv` for fast dependency management:
+
+    <CodeGroup>
+    ```bash macOS/Linux
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ```
+
+    ```powershell Windows
+    powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+    ```
+    </CodeGroup>
+
+    Verify the installation:
+
+    ```bash
+    uv --version
+    ```
+  </Step>
+
+  <Step title="just task runner">
+    Install `just` for running project commands:
+
+    <CodeGroup>
+    ```bash macOS
+    brew install just
+    ```
+
+    ```bash Linux
+    # Using cargo
+    cargo install just
+
+    # Or download from GitHub releases
+    # https://github.com/casey/just/releases
+    ```
+
+    ```bash Windows
+    # Using cargo
+    cargo install just
+
+    # Or using Scoop
+    scoop install just
+    ```
+    </CodeGroup>
+
+    Verify the installation:
+
+    ```bash
+    just --version
+    ```
+
+    <Note>
+      See the [just documentation](https://just.systems/) for more installation options.
+    </Note>
+  </Step>
+
+  <Step title="Optional: Ollama for local models">
+    If you want to run local AI models (useful for privacy-sensitive research), install Ollama:
+
+    Visit [ollama.com](https://ollama.com) and follow the installation instructions for your platform.
+
+    Verify the installation:
+
+    ```bash
+    ollama --version
+    ```
+
+    <Warning>
+      Local models require significant resources. The default Qwen 2.5 32B model requires ~23GB download and runs best with at least 32GB RAM.
+    </Warning>
+  </Step>
+</Steps>
+
+## Install Hinbox
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/strickvl/hinbox.git
+cd hinbox
+```
+
+### 2. Install dependencies
+
+Hinbox supports two installation modes:
+
+<Tabs>
+  <Tab title="Cloud embeddings (recommended)">
+    Install with cloud embeddings only (works on all platforms including Intel Mac):
+
+    ```bash
+    uv sync
+    ```
+
+    This is the recommended option for most users. Cloud embeddings via Jina AI are fast and don't require GPU resources.
+  </Tab>
+
+  <Tab title="Local embeddings">
+    Install with local embedding support (requires PyTorch):
+
+    ```bash
+    uv sync --extra local-embeddings
+    ```
+
+    This option requires:
+    - Linux, Apple Silicon Mac, or Windows
+    - Sufficient RAM for PyTorch models
+    - Optional: GPU for faster processing
+
+    <Note>
+      Local embeddings are useful for completely offline processing or when you need full privacy control.
+    </Note>
+  </Tab>
+</Tabs>
+
+### 3. Set up environment variables
+
+Create a `.env` file in the project root to store your API keys and configuration:
+
+```bash
+# Create .env file with Gemini API key (required for cloud models)
+echo 'GEMINI_API_KEY=your-gemini-api-key' > .env
+```
+
+Get your Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey).
+
+<Note>
+  The `just` task runner automatically loads environment variables from `.env` files.
+</Note>
+
+### 4. Optional: Set up local models
+
+If you installed Ollama and want to use local models:
+
+<Steps>
+  <Step title="Configure Ollama URL">
+    Add the Ollama API URL to your `.env` file:
+
+    ```bash
+    echo 'OLLAMA_API_URL=http://localhost:11434/v1' >> .env
+    ```
+  </Step>
+
+  <Step title="Pull the default model">
+    Download the Qwen 2.5 32B model (~23GB):
+
+    ```bash
+    ollama pull qwen2.5:32b-instruct-q5_K_M
+    ```
+
+    This is a powerful instruction-tuned model that works well for entity extraction. The download may take some time depending on your connection.
+  </Step>
+
+  <Step title="Set context window">
+    Configure a realistic context window for Ollama. Qwen 2.5 supports up to 131K tokens, but more context requires more VRAM.
+
+    Add to your shell profile (`.bashrc`, `.zshrc`, etc.) or systemd unit:
+
+    ```bash
+    export OLLAMA_CONTEXT_LENGTH=32768
+    ```
+
+    Then restart your shell or the Ollama service.
+  </Step>
+
+  <Step title="Optional: Override default models">
+    You can override the default models without editing code. Add to your `.env` file:
+
+    ```bash
+    # Override the local model (default: ollama/qwen2.5:32b-instruct-q5_K_M)
+    echo 'HINBOX_OLLAMA_MODEL=ollama/gemma2:27b' >> .env
+
+    # Override the cloud model (default: gemini/gemini-2.0-flash)
+    echo 'HINBOX_CLOUD_MODEL=gemini/gemini-2.5-flash' >> .env
+    ```
+
+    Hinbox uses [LiteLLM](https://docs.litellm.ai/docs/providers) under the hood, so you can use any model supported by LiteLLM.
+  </Step>
+</Steps>
+
+### 5. Verify installation
+
+Check that everything is working:
+
+```bash
+just domains
+```
+
+You should see a list of available research domains (at minimum, `guantanamo` and `template`).
+
+## Configuration files
+
+After installation, your project structure should look like this:
+
+```
+hinbox/
+├── .env                    # Your API keys and environment variables
+├── configs/               # Domain configurations
+│   ├── guantanamo/       # Example domain
+│   └── template/         # Template for new domains
+├── src/                  # Application code
+├── tests/                # Test suite
+├── scripts/              # Utility scripts
+├── data/                 # Data directory (created when you process sources)
+└── justfile              # Task runner commands
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quick start" icon="rocket" href="/quickstart">
+    Create your first domain and process historical sources
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration">
+    Learn how to configure domains for your research
+  </Card>
+</CardGroup>
+
+## Common installation issues
+
+<AccordionGroup>
+  <Accordion title="uv sync fails with dependency errors">
+    Try updating `uv` to the latest version:
+
+    ```bash
+    uv self update
+    ```
+
+    Then retry:
+
+    ```bash
+    uv sync
+    ```
+
+    If the issue persists, check that you're using Python 3.12 or higher:
+
+    ```bash
+    python --version
+    ```
+  </Accordion>
+
+  <Accordion title="PyTorch installation fails on Intel Mac">
+    Intel Macs are not supported for local embeddings due to PyTorch limitations. Use cloud embeddings instead:
+
+    ```bash
+    uv sync  # Without --extra local-embeddings
+    ```
+  </Accordion>
+
+  <Accordion title="Ollama model fails to load">
+    Make sure:
+    1. Ollama service is running: `ollama serve`
+    2. Model is pulled: `ollama list` should show your model
+    3. Context length is set: `echo $OLLAMA_CONTEXT_LENGTH`
+
+    Try pulling the model again:
+
+    ```bash
+    ollama pull qwen2.5:32b-instruct-q5_K_M
+    ```
+  </Accordion>
+
+  <Accordion title="GEMINI_API_KEY not found">
+    Make sure you created the `.env` file in the project root:
+
+    ```bash
+    # Check if .env exists
+    cat .env
+
+    # Should show:
+    # GEMINI_API_KEY=your-key-here
+    ```
+
+    The `justfile` automatically loads `.env` variables using `set dotenv-load`.
+  </Accordion>
+
+  <Accordion title="just command not found">
+    Ensure `just` is installed and in your PATH:
+
+    ```bash
+    which just
+    ```
+
+    If not found, reinstall following the [just installation guide](https://just.systems/man/en/chapter_4.html).
+
+    Alternatively, you can run commands directly with `uv`:
+
+    ```bash
+    # Instead of: just domains
+    uv run python scripts/list_domains.py
+
+    # Instead of: just process-domain mydata
+    uv run python -m src.process_and_extract --domain mydata
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Development installation
+
+If you're contributing to Hinbox development, install dev dependencies:
+
+```bash
+uv sync --all-extras
+```
+
+This installs additional tools for testing and code quality:
+
+```bash
+# Run tests
+just test
+
+# Format code
+just format
+
+# Lint code
+just lint
+
+# Run CI checks (exactly what GitHub Actions runs)
+just ci
+```
+
+<Note>
+  The CI checks include linting with Ruff and running the test suite. Always run `just ci` before submitting pull requests.
+</Note>
+
+## System requirements
+
+### Minimum requirements (cloud mode)
+
+- **CPU**: Any modern multi-core processor
+- **RAM**: 8GB minimum, 16GB recommended
+- **Disk**: 2GB for installation + space for your data
+- **Network**: Internet connection for cloud API calls
+
+### Recommended for local mode
+
+- **CPU**: 8+ cores recommended
+- **RAM**: 32GB minimum for Qwen 2.5 32B
+- **GPU**: Optional but recommended (16GB+ VRAM)
+- **Disk**: 50GB+ for models and data
+
+### Platform support
+
+| Platform | Cloud embeddings | Local embeddings | Notes |
+|----------|-----------------|------------------|-------|
+| Linux (x86_64) | ✓ | ✓ | Full support |
+| macOS (Apple Silicon) | ✓ | ✓ | Full support |
+| macOS (Intel) | ✓ | ✗ | PyTorch limitations |
+| Windows | ✓ | ✓ | Full support |
+
+## Privacy and security
+
+### Privacy mode
+
+For sensitive historical research, use the `--local` flag to enforce local-only processing:
+
+```bash
+just process-domain sensitive_research --local
+```
+
+This:
+- Forces local embeddings (no cloud API calls)
+- Disables all LLM telemetry callbacks
+- Requires local model setup (Ollama)
+- Requires local embeddings installation (`--extra local-embeddings`)
+
+### API key security
+
+<Warning>
+  Never commit your `.env` file or API keys to version control. The `.gitignore` file excludes `.env` by default.
+</Warning>
+
+Best practices:
+- Use environment-specific `.env` files
+- Rotate API keys regularly
+- Use separate keys for development and production
+- Monitor API usage in the provider dashboard
+
+### Data storage
+
+All extracted data is stored locally in the `data/` directory:
+
+```
+data/
+└── {domain}/
+    ├── raw_sources/           # Your input documents
+    ├── entities/              # Extracted entities (Parquet)
+    └── entities/cache/        # Extraction cache (JSON)
+```
+
+No data is sent to external services except:
+- Cloud API calls for embeddings and LLM inference (can be disabled with `--local`)
+- Optional telemetry (can be disabled with `--local`)

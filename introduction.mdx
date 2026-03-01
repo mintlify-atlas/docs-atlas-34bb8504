@@ -1,0 +1,143 @@
+---
+title: Introduction
+description: AI-powered entity extraction for historians and researchers
+---
+
+Hinbox is a flexible, domain-configurable entity extraction system designed for historians and researchers. It processes historical documents, academic papers, news articles, and book chapters to extract structured information about people, organizations, locations, and events.
+
+<img src="/images/frontpage.png" alt="Hinbox dashboard" />
+
+Originally designed for Guantánamo Bay media coverage analysis, Hinbox now supports any historical or research domain through a simple configuration system.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Research-focused" icon="graduation-cap">
+    Built specifically for historians, academics, and researchers working with large document collections
+  </Card>
+  <Card title="Domain-agnostic" icon="globe">
+    Configure for any historical period, region, or research topic through simple YAML and Markdown files
+  </Card>
+  <Card title="Multiple AI models" icon="brain">
+    Support for both cloud (Gemini default via LiteLLM) and local (Ollama) models with privacy mode
+  </Card>
+  <Card title="Smart deduplication" icon="compress">
+    RapidFuzz lexical blocking + embedding similarity with per-entity-type thresholds
+  </Card>
+  <Card title="Profile versioning" icon="clock-rotate-left">
+    Track how entity profiles evolve as new sources are processed
+  </Card>
+  <Card title="Citation-backed claims" icon="link">
+    Profile grounding verification ensures all claims are supported by source articles
+  </Card>
+</CardGroup>
+
+## What you can extract
+
+Hinbox extracts four core entity types from your historical sources:
+
+- **People** - Individuals mentioned in your sources with roles, affiliations, and biographical details
+- **Organizations** - Groups, institutions, companies, and agencies
+- **Locations** - Places, regions, facilities, and geographic entities
+- **Events** - Historical events, incidents, meetings, and significant occurrences
+
+Each entity type is fully customizable through domain configuration files. You define the categories and tags that make sense for your research.
+
+## How it works
+
+<Steps>
+  <Step title="Configure your domain">
+    Create a research domain with custom entity types, extraction prompts, and data paths. No Python coding required.
+  </Step>
+  <Step title="Process your sources">
+    Feed in historical documents in Parquet format. Hinbox extracts entities using AI models with automatic quality controls.
+  </Step>
+  <Step title="Smart merging">
+    Entities are deduplicated using lexical blocking and embedding similarity. A second-stage LLM arbitrates ambiguous matches.
+  </Step>
+  <Step title="Explore results">
+    Browse extracted entities in the FastHTML web interface with confidence badges, aliases, and version history.
+  </Step>
+</Steps>
+
+## Advanced capabilities
+
+### Extraction quality controls
+
+Deterministic QC validates extraction output with automatic retry when severe issues are detected:
+- Zero entities extracted
+- High drop rates during processing
+- Missing required fields
+- Invalid name normalization
+
+### Merge dispute agent
+
+Second-stage LLM arbitration for ambiguous entity matches near similarity thresholds. The dispute agent analyzes gray-band matches with low confidence scores.
+
+### 5-layer canonical name selection
+
+Deterministic scoring picks the best display name across aliases:
+- Penalizes acronyms and generic phrases
+- Prefers full, descriptive names
+- Handles merge scenarios intelligently
+
+### Extraction caching
+
+Persistent sidecar cache avoids redundant LLM calls:
+- Keyed on content hash, model, prompt, schema, and temperature
+- Skips re-processing unchanged articles
+- Configurable cache version for invalidation
+
+### Privacy mode
+
+Use the `--local` flag to enforce local-only processing:
+- Local embeddings only
+- Disables all LLM telemetry callbacks
+- Perfect for sensitive historical research
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Hinbox with uv and set up your environment
+  </Card>
+  <Card title="Quick start" icon="rocket" href="/quickstart">
+    Create your first domain and process historical sources
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration">
+    Learn how to configure domains for your research
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference">
+    Explore the processing pipeline and modules
+  </Card>
+</CardGroup>
+
+## Built with
+
+Hinbox is built with modern Python tools and libraries:
+- **Python 3.12+** - Core language
+- **Pydantic** - Schema validation and dynamic model generation
+- **FastHTML** - Web interface with "Archival Elegance" design
+- **LiteLLM** - Unified API for cloud and local models
+- **Instructor** - Structured LLM output
+- **RapidFuzz** - Fast lexical blocking
+- **Jina Embeddings** - Cloud embedding generation
+- **Rich** - Beautiful terminal logging
+
+## Example use cases
+
+### History of food in Palestine
+
+Extract farmers, traders, cookbook authors, agricultural cooperatives, markets, harvest events, and recipe documentation from historical texts.
+
+### Soviet-Afghan War (1980s)
+
+Identify military leaders, intelligence agencies, battles, refugee movements, and border crossings from news archives and diplomatic cables.
+
+### Medieval trade networks
+
+Discover merchants, trading companies, trade routes, market fairs, and diplomatic missions from historical records.
+
+<Note>
+  Hinbox was originally developed for analyzing Guantánamo Bay media coverage but is now fully domain-agnostic. You can configure it for any historical period, region, or research topic.
+</Note>

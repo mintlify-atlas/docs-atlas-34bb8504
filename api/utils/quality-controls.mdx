@@ -1,0 +1,648 @@
+---
+title: "Quality Controls"
+description: "Deterministic validation and filtering for extraction and profile outputs"
+icon: "shield-check"
+---
+
+## Overview
+
+The quality controls module provides deterministic validation and filtering functions that run after LLM generation. These checks enforce required fields, normalize names, detect duplicates, flag suspicious outputs, and verify profile grounding.
+
+**Key Principles:**
+- **Deterministic**: All checks are rule-based (no LLM calls)
+- **Non-destructive**: QC functions never raise exceptions, only drop invalid items and report
+- **Actionable**: Reports include flags and fix descriptions for debugging
+
+**Source:** `src/utils/quality_controls.py`
+
+---
+
+## Extraction QC
+
+### run_extraction_qc
+
+```python
+from src.utils.quality_controls import run_extraction_qc
+
+cleaned, report = run_extraction_qc(
+    entity_type="people",
+    entities=[{"name": "Abdul Rahman Ahmed", "nationality": "Yemeni"}],
+    domain="guantanamo",
+    min_name_len=2
+)
+```
+
+Run deterministic QC on a batch of extracted entities.
+
+<ParamField path="entity_type" type="str" required>
+  Entity type: `"people"`, `"organizations"`, `"locations"`, or `"events"`.
+</ParamField>
+
+<ParamField path="entities" type="List[Dict[str, Any]]" required>
+  List of entity dictionaries from LLM extraction.
+</ParamField>
+
+<ParamField path="domain" type="str" default="guantanamo">
+  Domain name for loading schema and equivalence groups.
+</ParamField>
+
+<ParamField path="min_name_len" type="int" default="2">
+  Minimum name length. Names shorter than this are flagged (but not dropped).
+</ParamField>
+
+<ResponseField name="cleaned_entities" type="List[Dict[str, Any]]">
+  Validated and deduplicated entities.
+</ResponseField>
+
+<ResponseField name="report" type="ExtractionQCReport">
+  Summary of QC actions (see below).
+</ResponseField>
+
+---
+
+### ExtractionQCReport
+
+```python
+class ExtractionQCReport(BaseModel):
+    input_count: int
+    dropped_missing_required: int
+    deduped: int
+    output_count: int
+    flags: List[str]
+    fixes: Dict[str, Any]
+```
+
+<ResponseField name="ExtractionQCReport" type="object">
+  <Expandable title="fields">
+    <ResponseField name="input_count" type="int">
+      Number of entities before QC.
+    </ResponseField>
+    <ResponseField name="dropped_missing_required" type="int">
+      Entities dropped for missing required fields.
+    </ResponseField>
+    <ResponseField name="deduped" type="int">
+      Duplicate entities removed (exact dedup + variant consolidation).
+    </ResponseField>
+    <ResponseField name="output_count" type="int">
+      Number of entities after QC.
+    </ResponseField>
+    <ResponseField name="flags" type="List[str]">
+      Issues detected:
+      - `zero_entities`: No entities extracted
+      - `missing_required:{field}`: Required field missing
+      - `short_name:{name}`: Name shorter than `min_name_len`
+      - `high_drop_rate`: >50% of entities dropped
+      - `many_duplicates`: >50% of entities were duplicates
+      - `many_low_quality_names`: Multiple generic/descriptive names
+    </ResponseField>
+    <ResponseField name="fixes" type="Dict[str, Any]">
+      Corrections applied:
+      - `normalized_names`: Count of names normalized
+      - `collapsed_variants`: Count of name variants consolidated
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### QC Pipeline Steps
+
+The extraction QC pipeline runs these checks in order:
+
+<Steps>
+  <Step title="Required Field Check">
+    Drops entities missing required fields (derived from Pydantic schema).
+    
+    **Required fields by type:**
+    - `people`: `name`
+    - `organizations`: `name`
+    - `locations`: `name`
+    - `events`: `title`, `description`, `event_type`, `start_date`
+  </Step>
+  
+  <Step title="Name Normalization">
+    Normalizes names/titles:
+    - Strip leading/trailing whitespace
+    - Collapse multiple whitespace to single space
+    - Unicode NFC normalization
+  </Step>
+  
+  <Step title="Short Name Flagging">
+    Flags (but does not drop) names shorter than `min_name_len`.
+  </Step>
+  
+  <Step title="Exact Deduplication">
+    Removes exact duplicates within the same article based on:
+    - `people`: `(name,)`
+    - `organizations`: `(name, type)`
+    - `locations`: `(name, type)`
+    - `events`: `(title, start_date)`
+  </Step>
+  
+  <Step title="Variant Consolidation">
+    Collapses name variants for organizations and locations:
+    - Acronym matching (e.g., "ICRC" ↔ "International Committee of the Red Cross")
+    - Substring containment
+    - Domain equivalence groups
+    
+    Keeps the more canonical name (proper nouns over descriptions) and adds the other to `aliases`.
+  </Step>
+  
+  <Step title="Low-Quality Name Detection">
+    Flags if multiple entities have generic/descriptive names (e.g., "the camp", "the facility").
+  </Step>
+</Steps>
+
+---
+
+### Example: Variant Consolidation
+
+```python
+from src.utils.quality_controls import run_extraction_qc
+
+entities = [
+    {"name": "International Committee of the Red Cross", "type": "humanitarian"},
+    {"name": "ICRC", "type": "humanitarian"},
+    {"name": "Red Cross", "type": "humanitarian"},
+]
+
+cleaned, report = run_extraction_qc(
+    entity_type="organizations",
+    entities=entities,
+    domain="guantanamo"
+)
+
+# Output:
+# cleaned = [
+#   {
+#     "name": "International Committee of the Red Cross",
+#     "type": "humanitarian",
+#     "aliases": ["ICRC", "Red Cross"]
+#   }
+# ]
+# report.deduped = 2
+# report.fixes = {"collapsed_variants": 2}
+```
+
+---
+
+## Entity Relevance Filtering
+
+### filter_entities_by_article_relevance
+
+```python
+from src.utils.quality_controls import filter_entities_by_article_relevance
+
+kept, report = filter_entities_by_article_relevance(
+    entity_type="organizations",
+    entities=[
+        {"name": "Red Cross", "aliases": ["ICRC"]},
+        {"name": "Fictional Org"},  # Hallucinated
+    ],
+    article_text="The ICRC visited the camp in 2005.",
+    domain="guantanamo",
+    require_mention=True
+)
+
+# kept = [{"name": "Red Cross", "aliases": ["ICRC"]}]
+# report.dropped = 1
+```
+
+Filter out entities whose names don't appear in the source article text.
+
+<ParamField path="entity_type" type="str" required>
+  Entity type: `"people"`, `"organizations"`, `"locations"`, or `"events"`.
+</ParamField>
+
+<ParamField path="entities" type="List[Dict[str, Any]]" required>
+  Entities to validate.
+</ParamField>
+
+<ParamField path="article_text" type="str" required>
+  Full article text to search for mentions.
+</ParamField>
+
+<ParamField path="domain" type="str" default="guantanamo">
+  Domain name for loading equivalence groups.
+</ParamField>
+
+<ParamField path="require_mention" type="bool" default="True">
+  Whether to enforce mention validation. If `False`, returns all entities.
+</ParamField>
+
+---
+
+### Mention Detection Strategy
+
+For each entity, builds a "needle set" from:
+1. Canonical name
+2. Aliases (from within-article dedup)
+3. Computed acronym (for orgs/locations)
+4. Domain equivalence group variants
+
+If **any** needle appears in the article text (case-insensitive), the entity is kept.
+
+**Special handling for short needles (≤3 chars):**
+- Uses word-boundary regex `\b..\b` to avoid false positives
+- Example: "UN" matches "The UN peacekeepers" but not "under"
+
+---
+
+## Profile QC
+
+### run_profile_qc
+
+```python
+from src.utils.quality_controls import run_profile_qc
+
+profile = {
+    "text": "Abdul Rahman Ahmed was detained at Guantanamo Bay. ^[art-001]",
+    "tags": ["detention"],
+    "confidence": 0.85
+}
+
+fixed_profile, report = run_profile_qc(
+    profile=profile,
+    min_text_len=50,
+    min_tags=1,
+    require_citations=True
+)
+```
+
+Run deterministic QC on a generated profile dictionary.
+
+<ParamField path="profile" type="Dict[str, Any]" required>
+  Profile dictionary with `text`, `tags`, and `confidence` fields.
+</ParamField>
+
+<ParamField path="min_text_len" type="int" default="100">
+  Minimum text length in characters. Profiles shorter than this fail QC.
+</ParamField>
+
+<ParamField path="min_tags" type="int" default="2">
+  Minimum number of tags. Defaults to `["needs-review"]` if below threshold.
+</ParamField>
+
+<ParamField path="require_citations" type="bool" default="True">
+  Whether to flag profiles with no citations.
+</ParamField>
+
+<ResponseField name="profile" type="Dict[str, Any]">
+  Profile with fixes applied (confidence clamped, tags defaulted).
+</ResponseField>
+
+<ResponseField name="report" type="ProfileQCReport">
+  Summary of QC checks (see below).
+</ResponseField>
+
+---
+
+### ProfileQCReport
+
+```python
+class ProfileQCReport(BaseModel):
+    text_length: int
+    citation_count: int
+    tag_count: int
+    confidence: Optional[float]
+    passed: bool
+    flags: List[str]
+    fixes: Dict[str, Any]
+```
+
+<ResponseField name="ProfileQCReport" type="object">
+  <Expandable title="fields">
+    <ResponseField name="text_length" type="int">
+      Length of profile text in characters.
+    </ResponseField>
+    <ResponseField name="citation_count" type="int">
+      Number of citations found (format: `^[article_id]`).
+    </ResponseField>
+    <ResponseField name="tag_count" type="int">
+      Number of tags.
+    </ResponseField>
+    <ResponseField name="confidence" type="float">
+      Confidence score (0.0 to 1.0) after clamping/defaulting.
+    </ResponseField>
+    <ResponseField name="passed" type="bool">
+      Whether the profile passed QC. `False` only if text is too short.
+    </ResponseField>
+    <ResponseField name="flags" type="List[str]">
+      Issues detected:
+      - `text_too_short`: Text below `min_text_len`
+      - `no_citations`: No citation markers found
+      - `tags_below_minimum`: Fewer tags than `min_tags`
+      - `confidence_missing_or_invalid`: Confidence not a number
+      - `confidence_clamped`: Confidence outside [0.0, 1.0]
+    </ResponseField>
+    <ResponseField name="fixes" type="Dict[str, Any]">
+      Corrections applied:
+      - `tags_defaulted`: Tags set to `["needs-review"]`
+      - `confidence_set_default`: Confidence set to `0.0`
+      - `confidence_clamped`: Confidence clamped to [0.0, 1.0]
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Citation Pattern
+
+Citations are detected using the regex pattern:
+
+```python
+CITATION_RE = re.compile(r"\^\[([^\]\s]+)\]")
+```
+
+**Format:** `^[article_id]` where `article_id` is non-empty and contains no whitespace.
+
+**Example:**
+```text
+Abdul Rahman Ahmed was detained at Guantanamo Bay in 2002. ^[art-001]
+He was released in 2009. ^[art-045]
+```
+
+---
+
+## Profile Grounding Verification
+
+### verify_profile_grounding
+
+```python
+from src.utils.quality_controls import verify_profile_grounding
+
+profile_text = """
+Abdul Rahman Ahmed was detained in 2002. ^[art-001]
+He was released in 2009. ^[art-045]
+"""
+
+article_texts = {
+    "art-001": "Abdul Rahman Ahmed, a Yemeni national, was captured in 2002...",
+    "art-045": "Ahmed was released from Guantanamo Bay in January 2009...",
+}
+
+report = verify_profile_grounding(
+    profile_text=profile_text,
+    article_texts=article_texts,
+    model_type="gemini",
+    max_article_chars=12000,
+    max_claim_chars=600,
+    min_grounding_score=0.7
+)
+
+print(f"Grounding score: {report.grounding_score:.1%}")  # 100%
+print(f"Passed: {report.passed}")  # True
+```
+
+Verify that profile claims are supported by their cited sources.
+
+<Warning>
+This function makes LLM calls (one per cited article). Use sparingly in production.
+</Warning>
+
+<ParamField path="profile_text" type="str" required>
+  Profile text with citation markers.
+</ParamField>
+
+<ParamField path="article_texts" type="Dict[str, str]" required>
+  Mapping of article IDs to full article text.
+</ParamField>
+
+<ParamField path="model_type" type="str" default="gemini">
+  LLM backend: `"gemini"` (cloud) or `"ollama"` (local).
+</ParamField>
+
+<ParamField path="max_article_chars" type="int" default="12000">
+  Maximum article text length to send to LLM (truncates longer articles).
+</ParamField>
+
+<ParamField path="max_claim_chars" type="int" default="600">
+  Maximum claim text length (truncates longer claims).
+</ParamField>
+
+<ParamField path="min_grounding_score" type="float" default="0.7">
+  Minimum grounding score to pass QC (0.0 to 1.0).
+</ParamField>
+
+<ResponseField name="report" type="GroundingReport">
+  Detailed verification report (see below).
+</ResponseField>
+
+---
+
+### GroundingReport
+
+```python
+class GroundingReport(BaseModel):
+    profile_text_hash: str
+    total_citations: int
+    verified: int
+    unverified: int
+    missing_source: int
+    grounding_score: Optional[float]
+    passed: bool
+    flags: List[str]
+    verifications: List[ClaimVerification]
+```
+
+<ResponseField name="GroundingReport" type="object">
+  <Expandable title="fields">
+    <ResponseField name="profile_text_hash" type="str">
+      SHA-256 hash of profile text (for caching verification results).
+    </ResponseField>
+    <ResponseField name="total_citations" type="int">
+      Number of citations in profile.
+    </ResponseField>
+    <ResponseField name="verified" type="int">
+      Citations with `SUPPORTED` or `PARTIAL` support.
+    </ResponseField>
+    <ResponseField name="unverified" type="int">
+      Citations with `NOT_SUPPORTED` or `UNCLEAR` support.
+    </ResponseField>
+    <ResponseField name="missing_source" type="int">
+      Citations whose source article was not provided.
+    </ResponseField>
+    <ResponseField name="grounding_score" type="float">
+      Ratio of verified to total citations (0.0 to 1.0).
+    </ResponseField>
+    <ResponseField name="passed" type="bool">
+      Whether grounding score ≥ `min_grounding_score`.
+    </ResponseField>
+    <ResponseField name="flags" type="List[str]">
+      Issues detected:
+      - `no_citations`: Profile has no citations
+      - `missing_sources`: Some cited articles not provided
+      - `unsupported_claims`: At least one claim marked `NOT_SUPPORTED`
+      - `low_grounding_score`: Score below threshold
+      - `llm_count_mismatch`: LLM returned wrong number of verifications
+      - `verification_error`: LLM call failed
+    </ResponseField>
+    <ResponseField name="verifications" type="List[ClaimVerification]">
+      Per-claim verification details.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### ClaimVerification
+
+```python
+class ClaimVerification(BaseModel):
+    article_id: str
+    citation: str
+    claim: str
+    support_level: SupportLevel
+    reasoning: Optional[str]
+```
+
+<ResponseField name="ClaimVerification" type="object">
+  <Expandable title="fields">
+    <ResponseField name="article_id" type="str">
+      Article ID from citation.
+    </ResponseField>
+    <ResponseField name="citation" type="str">
+      Original citation marker (e.g., `^[art-001]`).
+    </ResponseField>
+    <ResponseField name="claim" type="str">
+      Text span supported by the citation.
+    </ResponseField>
+    <ResponseField name="support_level" type="SupportLevel">
+      Enum:
+      - `SUPPORTED`: Source clearly supports the claim
+      - `PARTIAL`: Source partially supports the claim
+      - `NOT_SUPPORTED`: Source does not support the claim
+      - `UNCLEAR`: Source is ambiguous or insufficient
+      - `MISSING_SOURCE`: Source article not available
+    </ResponseField>
+    <ResponseField name="reasoning" type="str">
+      Brief explanation of the support level.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Example: Grounding Verification
+
+```python
+from src.utils.quality_controls import verify_profile_grounding
+
+profile_text = """
+Mohamedou Ould Slahi was detained at Guantanamo Bay. ^[slahi-memoir]
+He wrote a bestselling memoir about his experience. ^[slahi-memoir]
+He was released in 2016. ^[missing-article]
+"""
+
+article_texts = {
+    "slahi-memoir": "Mohamedou Ould Slahi published Guantanamo Diary in 2015...",
+    # "missing-article" not provided
+}
+
+report = verify_profile_grounding(
+    profile_text=profile_text,
+    article_texts=article_texts,
+    min_grounding_score=0.7
+)
+
+print(f"Total citations: {report.total_citations}")  # 3
+print(f"Verified: {report.verified}")  # 2
+print(f"Missing source: {report.missing_source}")  # 1
+print(f"Grounding score: {report.grounding_score:.1%}")  # 66.7%
+print(f"Passed: {report.passed}")  # False (< 0.7)
+print(f"Flags: {report.flags}")  # ["missing_sources", "low_grounding_score"]
+
+for v in report.verifications:
+    print(f"{v.citation}: {v.support_level} - {v.reasoning}")
+```
+
+---
+
+## Utility Functions
+
+### normalize_name
+
+```python
+from src.utils.quality_controls import normalize_name
+
+name = normalize_name("  Abdul  Rahman   Ahmed  ")
+print(name)  # "Abdul Rahman Ahmed"
+```
+
+Normalize an entity name:
+- Strip leading/trailing whitespace
+- Collapse multiple whitespace to single space
+- Unicode NFC normalization
+
+<Note>
+Automatically called by `run_extraction_qc()` — you typically don't need to call this directly.
+</Note>
+
+---
+
+## Constants
+
+### Default Thresholds
+
+```python
+from src.constants import (
+    QC_MIN_NAME_LENGTH,
+    PROFILE_QC_MIN_TEXT_LENGTH,
+    PROFILE_QC_MIN_TAG_COUNT,
+)
+
+print(QC_MIN_NAME_LENGTH)  # 2
+print(PROFILE_QC_MIN_TEXT_LENGTH)  # 100
+print(PROFILE_QC_MIN_TAG_COUNT)  # 2
+```
+
+These constants define default QC thresholds used throughout the pipeline.
+
+---
+
+## Integration Example
+
+```python Complete Extraction Pipeline
+from src.utils.quality_controls import (
+    run_extraction_qc,
+    filter_entities_by_article_relevance,
+)
+from src.engine.extractors import extract_entities
+
+# 1. Extract entities (LLM call)
+raw_entities = extract_entities(
+    text=article_text,
+    entity_type="organizations",
+    domain="guantanamo"
+)
+
+# 2. Run extraction QC
+cleaned, qc_report = run_extraction_qc(
+    entity_type="organizations",
+    entities=raw_entities,
+    domain="guantanamo"
+)
+
+if qc_report.flags:
+    print(f"QC flags: {qc_report.flags}")
+
+# 3. Filter by article relevance
+kept, relevance_report = filter_entities_by_article_relevance(
+    entity_type="organizations",
+    entities=cleaned,
+    article_text=article_text,
+    domain="guantanamo"
+)
+
+print(f"Extracted: {qc_report.input_count}")
+print(f"After QC: {qc_report.output_count}")
+print(f"After relevance: {relevance_report.output_count}")
+```
+
+---
+
+## See Also
+
+- [Name Variants](/concepts/entities) - Name normalization and equivalence detection
+- [Extractors](/api/engine/extractors) - Entity extraction with QC retry
+- [Profiles](/api/engine/profiles) - Profile generation and versioning

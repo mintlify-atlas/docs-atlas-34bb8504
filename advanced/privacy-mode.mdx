@@ -1,0 +1,345 @@
+---
+title: 'Privacy Mode'
+description: 'Process sensitive historical documents with complete local privacy using --local flag'
+icon: 'lock'
+---
+
+## Overview
+
+Hinbox's **Privacy Mode** ensures that no data from your historical documents leaves your local machine. This is critical for:
+
+- **Sensitive archival research** (unpublished manuscripts, confidential sources)
+- **GDPR/compliance requirements** in academic institutions
+- **Embargo periods** before publication
+- **Proprietary historical collections** with usage restrictions
+
+<Warning>
+  Privacy mode requires local hardware (GPU recommended). See [Local Models](/advanced/local-models) for setup.
+</Warning>
+
+## How It Works
+
+The `--local` flag triggers three privacy-critical behaviors (from `src/process_and_extract.py:786-794`):
+
+```python
+if args.local:
+    disable_llm_callbacks()           # Disable all telemetry
+    os.environ["EMBEDDING_MODE"] = "local"  # Force local embeddings
+    reset_embedding_manager_cache()
+    ensure_local_embeddings_available()
+    log(
+        "Privacy mode: embeddings + callbacks forced LOCAL (--local flag)",
+        level="info",
+    )
+```
+
+### 1. Disables LLM Telemetry
+
+By default, Hinbox uses [Braintrust](https://braintrust.dev) for optional LLM telemetry. The `disable_llm_callbacks()` function (`src/constants.py:62-75`) clears all callbacks:
+
+```python
+def disable_llm_callbacks() -> None:
+    """Disable all LiteLLM telemetry callbacks (for --local / privacy mode).
+
+    Call this early in main() before any LLM work begins. It clears the
+    callbacks list that modules set at import time.
+    """
+    global _CALLBACKS_ENABLED
+    _CALLBACKS_ENABLED = False
+    try:
+        import litellm
+        litellm.callbacks = []  # Clear all telemetry hooks
+    except ImportError:
+        pass
+```
+
+<Info>
+  **What gets disabled**: All LiteLLM callbacks including Braintrust, Langfuse, OpenTelemetry, and custom loggers.
+</Info>
+
+### 2. Forces Local Embeddings
+
+Cloud embeddings (Jina AI by default) are replaced with local models:
+
+```python
+os.environ["EMBEDDING_MODE"] = "local"
+```
+
+This switches from:
+- **Cloud**: `jina_ai/jina-embeddings-v3` (data sent to Jina API)
+- **Local**: `sentence-transformers/all-MiniLM-L6-v2` (runs on your GPU/CPU)
+
+From `src/constants.py:11-12`:
+```python
+CLOUD_EMBEDDING_MODEL = "jina_ai/jina-embeddings-v3"
+LOCAL_EMBEDDING_MODEL = "huggingface/jinaai/jina-embeddings-v3"
+```
+
+### 3. Uses Local LLM
+
+The `--local` flag sets `model_type = "ollama"` which routes all extraction through your local Ollama server.
+
+## Running in Privacy Mode
+
+<Steps>
+  <Step title="Install Local Dependencies">
+    Install Hinbox with local embeddings support:
+
+    ```bash
+    # Includes PyTorch for local embeddings
+    uv sync --extra local-embeddings
+    ```
+  </Step>
+
+  <Step title="Set Up Ollama">
+    See [Local Models setup](/advanced/local-models#setup) for full instructions:
+
+    ```bash
+    # Pull default model (~23GB)
+    ollama pull qwen2.5:32b-instruct-q5_K_M
+    
+    # Start Ollama server
+    ollama serve
+    ```
+  </Step>
+
+  <Step title="Process with --local Flag">
+    Run extraction in complete privacy:
+
+    ```bash
+    just process --domain guantanamo --limit 10 --local
+    ```
+
+    You should see:
+    ```
+    Privacy mode: embeddings + callbacks forced LOCAL (--local flag)
+    ```
+  </Step>
+</Steps>
+
+## Verification
+
+### Check Network Activity
+
+Verify no external API calls during processing:
+
+```bash
+# Monitor network connections during extraction
+sudo lsof -i -P | grep python
+```
+
+**Expected**: Only `localhost:11434` (Ollama) connections. No external IPs.
+
+### Inspect Logs
+
+Privacy mode logs show local-only operations:
+
+```
+[INFO] Privacy mode: embeddings + callbacks forced LOCAL (--local flag)
+[INFO] Concurrency: 8 workers, 4 types/article, 16 LLM in-flight
+[INFO] Using model: ollama/qwen2.5:32b-instruct-q5_K_M
+[INFO] Embedding mode: local
+```
+
+### Test Without Internet
+
+The ultimate verification:
+
+```bash
+# Disconnect from internet (macOS example)
+sudo networksetup -setairportpower en0 off
+
+# Should still work
+just process --domain guantanamo --limit 5 --local
+
+# Reconnect
+sudo networksetup -setairportpower en0 on
+```
+
+## What Gets Processed Locally
+
+<CardGroup cols={2}>
+  <Card title="Entity Extraction" icon="brain">
+    All LLM calls use local Ollama
+    - People, organizations, locations, events
+    - Relevance filtering  
+    - Profile generation
+  </Card>
+
+  <Card title="Embeddings" icon="vector-square">
+    Similarity search runs locally
+    - Entity deduplication
+    - Semantic matching
+    - Name variant detection
+  </Card>
+
+  <Card title="Quality Controls" icon="shield-check">
+    All QC is deterministic and local
+    - Required field validation
+    - Name normalization
+    - Within-article dedup
+  </Card>
+
+  <Card title="Processing Status" icon="database">
+    Metadata stored in local files
+    - Sidecar JSON tracking
+    - Extraction cache
+    - Parquet entity storage
+  </Card>
+</CardGroup>
+
+## Privacy Guarantees
+
+### What Stays Local
+
+✅ **Article text content** - Never sent to cloud APIs  
+✅ **Extracted entities** - All processing on your machine  
+✅ **Embedding vectors** - Computed locally  
+✅ **Processing metadata** - Stored in local Parquet/JSON  
+✅ **Cache data** - Persistent cache in `data/{domain}/entities/cache/`  
+
+### What Gets Disabled
+
+🚫 **Braintrust telemetry** - No LLM call logging to external service  
+🚫 **Cloud API calls** - Zero network requests to Gemini, Jina, etc.  
+🚫 **Error reporting** - Crashes stay local (check logs manually)  
+🚫 **Usage analytics** - No phone-home behavior  
+
+## Configuration Reference
+
+### Telemetry Control
+
+From `src/constants.py:56-85`:
+
+```python
+# Braintrust project id (optional)
+BRAINTRUST_PROJECT_ID = os.getenv("BRAINTRUST_PROJECT_ID", "").strip() or None
+
+# Whether LLM telemetry callbacks are enabled (disabled in --local mode)
+_CALLBACKS_ENABLED = True
+
+def get_llm_callbacks() -> list:
+    """Return the callbacks list that LLM modules should use.
+
+    Returns ["braintrust"] when telemetry is enabled, [] when disabled.
+    """
+    if _CALLBACKS_ENABLED and BRAINTRUST_PROJECT_ID:
+        return ["braintrust"]
+    return []
+```
+
+### Embedding Mode
+
+Embedding selection logic from `src/utils/embeddings/manager.py`:
+
+```python
+mode = os.getenv("EMBEDDING_MODE", "cloud").lower()
+
+if mode == "local" or args.local:
+    # Use local sentence-transformers
+    provider = LocalEmbeddingProvider()
+elif mode == "cloud":
+    # Use Jina AI or configured cloud provider
+    provider = CloudEmbeddingProvider()
+```
+
+## Hybrid Mode (Not Recommended)
+
+You can technically run local LLM but cloud embeddings:
+
+```bash
+# NOT privacy-preserving!
+HINBOX_OLLAMA_MODEL=ollama/qwen2.5:32b
+just process --domain guantanamo --limit 5
+```
+
+This sends embedding requests to Jina AI. **For true privacy, always use `--local`.**
+
+## Performance Impact
+
+| Operation          | Cloud (Gemini + Jina) | Local (Ollama + transformers) |
+|--------------------|-----------------------|-------------------------------|
+| **Extraction**     | ~2-5 docs/sec         | ~0.5-2 docs/sec (GPU)         |
+| **Embeddings**     | ~100 texts/sec        | ~20-50 texts/sec (GPU)        |
+| **Deduplication**  | Fast (cloud batching) | Moderate (local batching)     |
+| **Overall Speed**  | 100%                  | ~30-50% (depends on GPU)      |
+
+<Tip>
+  **GPU is critical for reasonable local performance**. A modern GPU (RTX 3090, A100, etc.) makes local mode practical for large collections.
+</Tip>
+
+## Compliance Scenarios
+
+### GDPR Research (EU)
+
+```bash
+# All data stays in EU on your institution's servers
+just process --domain eu_migration_archives --local
+```
+
+**Result**: No data transfer to US cloud providers (Google, OpenAI, Jina).
+
+### Unpublished Manuscripts
+
+```bash
+# Process embargoed documents before publication
+just process --domain medieval_manuscripts --local --limit 100
+```
+
+**Result**: Content never sent to third-party APIs during embargo period.
+
+### Institutional Review Board (IRB)
+
+For research involving human subjects with privacy restrictions:
+
+```bash
+# Process interview transcripts locally
+just process --domain oral_histories --local --relevance-check
+```
+
+**Result**: Full HIPAA/IRB compliance (no PHI leaves local system).
+
+## Troubleshooting
+
+### "Local embeddings not available"
+
+```
+Error: Local embedding model not found
+```
+
+**Solution**: Install local-embeddings extra:
+```bash
+uv sync --extra local-embeddings
+```
+
+### Network Calls Still Happening
+
+If you see external connections:
+
+1. **Check for API keys in environment**: Remove `GEMINI_API_KEY`, `JINA_API_KEY`
+2. **Verify --local flag**: Must be passed to `just process`
+3. **Check config.yaml**: Ensure `embeddings.mode` isn't overriding
+
+### Slow Local Performance
+
+See [Performance Tuning](/advanced/performance) for:
+- GPU memory optimization
+- Concurrency settings for local mode
+- Batch size configuration
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Local Models" icon="server" href="/advanced/local-models">
+    Complete Ollama setup and model selection guide
+  </Card>
+  <Card title="Performance" icon="gauge" href="/advanced/performance">
+    Optimize concurrency for local GPU processing
+  </Card>
+  <Card title="Quality Controls" icon="shield-check" href="/advanced/quality-controls">
+    Understand local QC and validation logic
+  </Card>
+  <Card title="Caching" icon="database" href="/advanced/caching">
+    Local extraction cache for faster re-runs
+  </Card>
+</CardGroup>

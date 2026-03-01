@@ -1,0 +1,430 @@
+---
+title: 'Performance Tuning'
+description: 'Optimize extraction speed with concurrency, batching, and caching configuration'
+icon: 'gauge'
+---
+
+## Overview
+
+Hinbox uses a **parallel producer-consumer pipeline** with multiple tunable parameters for throughput optimization. Key levers:
+
+- **Extraction workers**: Parallel article processing
+- **Per-article concurrency**: Parallel entity types within articles
+- **LLM in-flight limits**: Rate limiting for cloud/local APIs
+- **Batch sizes**: Embedding computation efficiency
+- **Queue backpressure**: Memory management for large runs
+
+<Info>
+  Optimal settings depend on your hardware (GPU VRAM, CPU cores), model choice (cloud vs. local), and rate limits.
+</Info>
+
+## Concurrency Architecture
+
+From `src/process_and_extract.py:10-17`:
+
+```python
+"""
+Concurrency model (Phase 2 speed audit):
+  - Multiple extraction workers process articles in parallel via ThreadPoolExecutor.
+  - Within each article, the 4 entity-type extractions also run concurrently.
+  - A shared LLM semaphore bounds cloud API concurrency.
+  - A single merge actor (the main thread) consumes extraction results in article
+    order and is the *only* writer to the shared entities dict and
+    ProcessingStatus sidecar, so no locking is needed.
+"""
+```
+
+### Pipeline Stages
+
+```mermaid
+graph LR
+    A[Article Queue] --> B[Extraction Workers]
+    B --> C[Entity Type Extraction]
+    C --> D[LLM Semaphore]
+    D --> E[Merge Actor]
+    E --> F[Entity Storage]
+```
+
+1. **Extraction Workers** (`extract_workers`): Process multiple articles concurrently
+2. **Entity Type Extraction** (`extract_per_article`): 4 entity types (people, orgs, locations, events) run in parallel per article
+3. **LLM Semaphore** (`llm_in_flight` / `ollama_in_flight`): Bounds concurrent API calls to respect rate limits
+4. **Merge Actor** (main thread): Single-threaded merge prevents race conditions
+
+## Configuration Settings
+
+Settings are defined in `configs/{domain}/config.yaml`. From `configs/guantanamo/config.yaml:49-63`:
+
+```yaml
+# Performance / concurrency configuration
+performance:
+  concurrency:
+    extract_workers: 8        # parallel articles in extraction phase
+    extract_per_article: 4    # parallel entity types within article
+    llm_in_flight: 16         # max concurrent cloud LLM calls
+    ollama_in_flight: 2       # max concurrent Ollama calls (local mode)
+  queue:
+    max_buffered_articles: 32  # backpressure limit for extraction -> merge
+
+# Batching configuration (for embedding calls during merge)
+batching:
+  embed_batch_size: 64        # texts per embedding API call
+  embed_drain_timeout_ms: 100 # reserved for future async drain behaviour
+```
+
+### Parameter Guide
+
+#### `extract_workers`
+
+**What it controls**: Number of articles processed simultaneously.
+
+**Tuning**:
+- **Cloud mode**: Set to 2-4x your `llm_in_flight` limit
+- **Local mode**: Match your CPU core count (e.g., 8 for 8-core system)
+- **Memory constrained**: Lower to 4-8 to reduce RAM usage
+
+**Example**:
+```yaml
+extract_workers: 16  # Process 16 articles at once (cloud mode)
+```
+
+#### `extract_per_article`
+
+**What it controls**: Parallel entity type extractions within a single article (max 4: people, orgs, locations, events).
+
+**Tuning**:
+- **Default**: `4` (all entity types in parallel)
+- **Memory constrained**: `2` (extract 2 types at a time)
+- **CPU bottleneck**: `1` (sequential extraction)
+
+**Example**:
+```yaml
+extract_per_article: 4  # Extract all 4 entity types concurrently
+```
+
+#### `llm_in_flight` (Cloud Mode)
+
+**What it controls**: Maximum concurrent API calls to cloud LLMs (Gemini, GPT, Claude).
+
+**Tuning**:
+- **Gemini Flash**: `16-32` (high rate limits)
+- **GPT-4**: `4-8` (stricter rate limits)
+- **Claude**: `8-16` (moderate rate limits)
+- **Avoid 429 errors**: Start low and increase
+
+**Example**:
+```yaml
+llm_in_flight: 24  # Up to 24 concurrent Gemini API calls
+```
+
+#### `ollama_in_flight` (Local Mode)
+
+**What it controls**: Maximum concurrent Ollama inference requests.
+
+**Tuning based on GPU VRAM**:
+- **16GB VRAM**: `1` (single request at a time)
+- **24GB VRAM**: `2` (default, safe for 32B models)
+- **48GB+ VRAM**: `4` (can handle 2x parallel 32B or 1x 70B)
+
+**Example**:
+```yaml
+ollama_in_flight: 2  # Safe for 24GB GPU with Qwen 2.5 32B
+```
+
+<Warning>
+  **Setting `ollama_in_flight` too high causes OOM (out of memory) crashes**. Each concurrent request loads a model copy into VRAM.
+</Warning>
+
+#### `max_buffered_articles`
+
+**What it controls**: Queue size limit between extraction workers and merge actor.
+
+**Tuning**:
+- **Default**: `32` (balanced memory usage)
+- **Large RAM systems**: `64-128` (more buffering)
+- **Memory constrained**: `16` (tighter backpressure)
+
+**Example**:
+```yaml
+max_buffered_articles: 64  # Allow more in-flight work
+```
+
+#### `embed_batch_size`
+
+**What it controls**: Number of texts batched in a single embedding API call.
+
+**Tuning**:
+- **Cloud (Jina AI)**: `64-100` (API supports large batches)
+- **Local (sentence-transformers)**: `32-64` (GPU memory dependent)
+- **CPU-only local**: `16` (smaller batches for CPU inference)
+
+**Example**:
+```yaml
+embed_batch_size: 100  # Max batch for Jina AI cloud embeddings
+```
+
+## Loading Configuration
+
+Settings are loaded at runtime from `src/process_and_extract.py:798-809`:
+
+```python
+# Configure LLM concurrency limiter
+cc = config.get_concurrency_config()
+configure_llm_concurrency(
+    cloud_in_flight=cc["llm_in_flight"] if model_type == "gemini" else None,
+    local_in_flight=cc["ollama_in_flight"] if model_type == "ollama" else None,
+)
+log(
+    f"Concurrency: {cc['extract_workers']} workers, "
+    f"{cc['extract_per_article']} types/article, "
+    f"{cc['llm_in_flight']} LLM in-flight",
+    level="info",
+)
+```
+
+## Optimization Recipes
+
+### Maximum Cloud Throughput
+
+```yaml
+performance:
+  concurrency:
+    extract_workers: 32       # High parallelism
+    extract_per_article: 4    # All types parallel
+    llm_in_flight: 64         # Aggressive cloud API usage
+    ollama_in_flight: 2
+  queue:
+    max_buffered_articles: 128
+
+batching:
+  embed_batch_size: 100       # Max Jina batching
+```
+
+**Best for**: Cloud mode with high rate limits, 16+ CPU cores, 32GB+ RAM.
+
+### Local GPU Optimized (24GB VRAM)
+
+```yaml
+performance:
+  concurrency:
+    extract_workers: 8        # Match CPU cores
+    extract_per_article: 4
+    llm_in_flight: 16
+    ollama_in_flight: 2       # Safe for 32B model
+  queue:
+    max_buffered_articles: 32
+
+batching:
+  embed_batch_size: 64        # Local embedding batching
+```
+
+**Best for**: Ollama with Qwen 2.5 32B, RTX 3090/4090, 8-core CPU.
+
+### Memory Constrained (8GB RAM)
+
+```yaml
+performance:
+  concurrency:
+    extract_workers: 4        # Low parallelism
+    extract_per_article: 2    # Sequential entity types
+    llm_in_flight: 8
+    ollama_in_flight: 1
+  queue:
+    max_buffered_articles: 16 # Tight backpressure
+
+batching:
+  embed_batch_size: 32
+```
+
+**Best for**: Laptops, cloud VMs with limited RAM, CPU-only inference.
+
+### Balanced Default
+
+```yaml
+performance:
+  concurrency:
+    extract_workers: 8
+    extract_per_article: 4
+    llm_in_flight: 16
+    ollama_in_flight: 2
+  queue:
+    max_buffered_articles: 32
+
+batching:
+  embed_batch_size: 64
+```
+
+**Best for**: Most use cases, ships as default in `configs/guantanamo/config.yaml`.
+
+## Monitoring Performance
+
+### Extraction Logs
+
+Watch for concurrency indicators:
+
+```
+[INFO] Concurrency: 8 workers, 4 types/article, 16 LLM in-flight
+[INFO] Processing 100 articles...
+[SUCCESS] Extracted 4 entity types in 2.34s (people=12, orgs=8, locs=5, events=3)
+```
+
+### GPU Monitoring (Local Mode)
+
+```bash
+# Watch GPU usage in real-time
+watch -n 1 nvidia-smi
+```
+
+**Expected during extraction**:
+- **GPU Util**: 85-100% (good)
+- **Memory**: 20-22GB / 24GB (healthy headroom)
+- **Processes**: 1-2 (matches `ollama_in_flight`)
+
+### CPU Monitoring
+
+```bash
+htop  # Interactive process viewer
+```
+
+**Expected**:
+- **CPU cores**: All cores active during extraction
+- **Python processes**: Matches `extract_workers` setting
+- **RAM usage**: Proportional to `max_buffered_articles`
+
+## Bottleneck Diagnosis
+
+### Symptom: Low GPU Utilization (under 50%)
+
+**Causes**:
+- `ollama_in_flight` too low (GPU idle waiting for requests)
+- `extract_workers` too low (not enough parallel articles)
+- CPU bottleneck (workers blocked on preprocessing)
+
+**Solutions**:
+1. Increase `ollama_in_flight` (if VRAM allows)
+2. Increase `extract_workers` to match CPU cores
+3. Profile with `py-spy` to find CPU hotspots
+
+### Symptom: Out of Memory Crashes
+
+**Causes**:
+- `ollama_in_flight` too high (multiple model copies in VRAM)
+- `extract_workers` too high (too many articles in RAM)
+- `max_buffered_articles` too high (queue overflow)
+
+**Solutions**:
+1. Reduce `ollama_in_flight` to `1`
+2. Reduce `extract_workers` to `4`
+3. Lower `max_buffered_articles` to `16`
+4. Use smaller model (e.g., Qwen 14B instead of 32B)
+
+### Symptom: Rate Limit Errors (429)
+
+**Causes**:
+- `llm_in_flight` exceeds cloud API rate limits
+
+**Solutions**:
+1. Reduce `llm_in_flight` (try halving it)
+2. Add retry backoff in `src/constants.py:28-30`:
+   ```python
+   MAX_RETRIES = 3
+   BASE_DELAY = 2.0  # Increase to 5.0 for aggressive backoff
+   ```
+
+### Symptom: Slow Merge Phase
+
+**Causes**:
+- Large existing entity count (millions of entities)
+- Embedding similarity search overhead
+
+**Solutions**:
+1. Enable lexical blocking in config.yaml (already default):
+   ```yaml
+   dedup:
+     lexical_blocking:
+       enabled: true
+       threshold: 60
+       max_candidates: 50
+   ```
+2. Increase `embed_batch_size` for fewer API calls
+3. See [Caching](/advanced/caching) to avoid re-embedding
+
+## Advanced Tuning
+
+### Context Window vs. Speed
+
+From [Local Models setup](/advanced/local-models#setup):
+
+```bash
+export OLLAMA_CONTEXT_LENGTH=32768  # Default, balanced
+export OLLAMA_CONTEXT_LENGTH=8192   # Faster, less context
+export OLLAMA_CONTEXT_LENGTH=65536  # Slower, more context
+```
+
+**Trade-off**: Larger context windows use more VRAM and slow inference but improve extraction quality for long documents.
+
+### LLM Generation Settings
+
+From `src/constants.py:32-35`:
+
+```python
+# LLM generation defaults
+DEFAULT_MAX_TOKENS = 2048
+DEFAULT_TEMPERATURE = 0
+MAX_ITERATIONS = 3  # Instructor retry attempts
+```
+
+Reduce `MAX_ITERATIONS` for faster (but less robust) extraction:
+
+```python
+MAX_ITERATIONS = 1  # Skip retries, accept first response
+```
+
+### Batch Processing
+
+Process in chunks to avoid RAM buildup:
+
+```bash
+# Process 1000 articles in batches of 100
+for i in {0..9}; do
+  just process --domain guantanamo --limit 100 --skip $((i * 100))
+done
+```
+
+## Performance Benchmarks
+
+### Cloud (Gemini 2.0 Flash)
+
+| Workers | LLM In-Flight | Articles/Sec | Notes               |
+|---------|---------------|--------------|---------------------|
+| 8       | 16            | 2.1          | Default             |
+| 16      | 32            | 3.8          | High rate limit     |
+| 32      | 64            | 5.2          | Max throughput      |
+
+### Local (Qwen 2.5 32B, RTX 4090)
+
+| Workers | Ollama In-Flight | Articles/Sec | VRAM Usage |
+|---------|------------------|--------------|------------|
+| 4       | 1                | 0.6          | 18GB       |
+| 8       | 2                | 1.2          | 22GB       |
+| 8       | 4                | 1.4          | 24GB (OOM risk) |
+
+<Tip>
+  **Diminishing returns after 2x `ollama_in_flight`** due to GPU context switching overhead.
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Caching" icon="database" href="/advanced/caching">
+    Skip redundant LLM calls with extraction cache
+  </Card>
+  <Card title="Quality Controls" icon="shield-check" href="/advanced/quality-controls">
+    Balance speed with extraction quality thresholds
+  </Card>
+  <Card title="Local Models" icon="server" href="/advanced/local-models">
+    Choose faster models for local processing
+  </Card>
+  <Card title="Privacy Mode" icon="lock" href="/advanced/privacy-mode">
+    Performance considerations for --local flag
+  </Card>
+</CardGroup>

@@ -1,80 +1,333 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick start
+description: Get started with Hinbox in 5 minutes
 ---
 
-## Get started in three steps
+This guide will get you from installation to extracting entities from historical sources in just a few steps.
 
-Get your documentation site running locally and make your first customization.
+<Note>
+  Make sure you've completed the [installation](/installation) before starting this guide.
+</Note>
 
-### Step 1: Set up your local environment
+## List available domains
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+First, check what research domains are already configured:
 
-### Step 2: Deploy your changes
+```bash
+just domains
+```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+You should see at least the `guantanamo` domain that ships with Hinbox, plus the `template` domain.
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Create a new research domain
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+Let's create a domain for researching the history of food in Palestine:
 
-### Step 3: Go live
+```bash
+just init palestine_food_history
+```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+This copies the template configuration to `configs/palestine_food_history/` with these files:
+
+- `config.yaml` - Research domain settings and data paths
+- `prompts/*.md` - Extraction instructions for each entity type
+- `categories/*.yaml` - Entity type definitions
+
+<Steps>
+  <Step title="Edit the domain configuration">
+    Open `configs/palestine_food_history/config.yaml` and update the domain settings:
+
+    ```yaml
+    domain: "palestine_food_history"
+    description: "Historical analysis of Palestinian food culture and agriculture"
+
+    data_sources:
+      default_path: "data/palestine_food_history/raw_sources/historical_sources.parquet"
+
+    output:
+      directory: "data/palestine_food_history/entities"
+
+    similarity_threshold: 0.75
+    ```
+  </Step>
+
+  <Step title="Customize entity types">
+    Edit `configs/palestine_food_history/categories/people.yaml` to define relevant person types:
+
+    ```yaml
+    person_types:
+      farmer:
+        description: "Agricultural workers and farmers"
+        examples: ["olive farmer", "wheat grower", "shepherd"]
+      trader:
+        description: "Food merchants and traders"
+        examples: ["spice trader", "grain merchant", "market vendor"]
+      cookbook_author:
+        description: "Authors of cookbooks and recipe collections"
+        examples: ["food writer", "culinary historian"]
+      researcher:
+        description: "Anthropologists and food historians"
+        examples: ["ethnographer", "food anthropologist"]
+    ```
+
+    Similarly, customize `organizations.yaml`, `locations.yaml`, and `events.yaml` for your domain.
+  </Step>
+
+  <Step title="Update extraction prompts">
+    Edit `configs/palestine_food_history/prompts/people.md` with domain-specific instructions:
+
+    ```markdown
+    You are an expert at extracting people from historical documents about Palestinian food culture.
+
+    Focus on:
+    - Farmers and agricultural workers
+    - Traders and merchants
+    - Cookbook authors and food writers
+    - Researchers and anthropologists
+    - Community leaders involved in food systems
+
+    Extract their names, roles, affiliations, and any biographical details mentioned.
+    ```
+  </Step>
+</Steps>
+
+## Prepare your data
+
+Hinbox expects historical sources in Parquet format with these columns:
+
+| Column | Description |
+|--------|-------------|
+| `title` | Document or article title |
+| `content` | Full text content |
+| `url` | Source URL (if applicable) |
+| `published_date` | Publication or creation date |
+| `source_type` | Type: "book_chapter", "journal_article", "news_article", "archival_document" |
+
+<CodeGroup>
+```python Python example
+import pandas as pd
+
+# Create a sample dataset
+data = {
+    "title": [
+        "Traditional Palestinian Olive Cultivation",
+        "Food Markets in 19th Century Jerusalem"
+    ],
+    "content": [
+        "The olive harvest in Palestine has been documented since...",
+        "According to travelers' accounts, the markets of Jerusalem..."
+    ],
+    "url": [
+        "https://example.com/olives",
+        "https://example.com/markets"
+    ],
+    "published_date": ["1920-01-01", "1895-06-15"],
+    "source_type": ["book_chapter", "archival_document"]
+}
+
+df = pd.DataFrame(data)
+df.to_parquet("data/palestine_food_history/raw_sources/historical_sources.parquet")
+```
+
+```bash CSV conversion
+# If you have CSV files, convert them to Parquet
+python -c "
+import pandas as pd
+df = pd.read_csv('sources.csv')
+df.to_parquet('historical_sources.parquet')
+"
+```
+</CodeGroup>
+
+## Process your sources
+
+Now you're ready to process historical sources and extract entities:
+
+```bash
+just process-domain palestine_food_history --limit 5
+```
+
+This command:
+- Processes the first 5 articles
+- Checks relevance to your domain
+- Extracts entities using AI models
+- Applies quality controls and retries if needed
+- Deduplicates entities using smart matching
+- Saves results to `data/palestine_food_history/entities/`
+
+<Note>
+  Start with `--limit 5` to test your configuration. Once you're satisfied with the results, remove the limit to process all sources.
+</Note>
+
+### Processing options
+
+Hinbox provides several options to control processing:
+
+```bash
+# Process with verbose output to see extraction details
+just process-domain palestine_food_history --limit 10 --verbose
+
+# Enable relevance checking to filter irrelevant sources
+just process-domain palestine_food_history --relevance-check
+
+# Use local models for privacy (requires Ollama)
+just process-domain palestine_food_history --local
+
+# Force reprocess articles (ignores cache)
+just process-domain palestine_food_history --force-reprocess
+```
+
+## Explore your results
+
+Launch the web interface to browse extracted entities:
+
+```bash
+just frontend
+```
+
+Open http://localhost:5001 in your browser. You'll see:
+
+- **Dashboard** - Overview of all entities by type
+- **Entity listings** - Browse people, organizations, locations, and events
+- **Entity profiles** - Detailed profiles with sources, aliases, and version history
+- **Search and filtering** - Find specific entities quickly
+- **Confidence badges** - Visual indicators of extraction quality
+
+<img src="/images/organizations-view.png" alt="Organizations listing" />
+
+## Understanding the output
+
+### Entity files
+
+Results are saved as Parquet files in your output directory:
+
+```
+data/palestine_food_history/entities/
+├── people.parquet
+├── organizations.parquet
+├── locations.parquet
+└── events.parquet
+```
+
+Each file contains:
+- `id` - Unique entity identifier
+- `canonical_name` - Best display name selected by 5-layer scoring
+- `aliases` - Alternative names found in sources
+- `type` - Entity type (e.g., "farmer", "trader")
+- `description` - Extracted description
+- `source_articles` - List of articles mentioning this entity
+- `confidence_score` - Quality metric
+- `version` - Profile version number
+
+### Processing status
+
+Check which articles have been processed:
+
+```bash
+just check
+```
+
+This shows:
+- Total articles in your dataset
+- Articles processed successfully
+- Articles pending processing
+- Articles that failed
+
+### Cache directory
+
+Extraction results are cached to avoid redundant LLM calls:
+
+```
+data/palestine_food_history/entities/cache/extractions/
+```
+
+The cache is keyed on content hash, model, prompt, schema, and temperature. Bump `cache.extraction.version` in `config.yaml` to invalidate the cache.
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Configuration guide" icon="sliders" href="/configuration">
+    Learn advanced configuration options for your domain
+  </Card>
+  <Card title="Processing pipeline" icon="diagram-project" href="/pipeline">
+    Understand how extraction, merging, and QC work
+  </Card>
+  <Card title="Web interface" icon="browser" href="/web-interface">
+    Explore the FastHTML frontend features
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference">
+    Technical details of the processing engine
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Tips for better results
+
+<Warning>
+  Always test your configuration with `--limit 5` before processing large datasets. This helps you iterate on prompts and entity types quickly.
+</Warning>
+
+### 1. Write specific prompts
+
+Generic prompts produce generic results. Make your extraction prompts specific to your historical period and sources:
+
+```markdown
+❌ Generic: "Extract people from the text."
+
+✓ Specific: "Extract farmers, traders, and food artisans from 19th century Palestinian sources. Include their roles, villages, and relationships to agricultural cooperatives."
+```
+
+### 2. Define narrow entity types
+
+Specific entity types improve extraction quality:
+
+```yaml
+❌ Too broad:
+person_types:
+  person:
+    description: "Any person"
+
+✓ Specific:
+person_types:
+  olive_farmer:
+    description: "Farmers specializing in olive cultivation"
+  grain_trader:
+    description: "Merchants trading wheat, barley, and other grains"
+```
+
+### 3. Use relevance filtering
+
+Enable relevance checking to skip irrelevant sources:
+
+```bash
+just process-domain palestine_food_history --relevance-check
+```
+
+Update `prompts/relevance.md` to define what makes a source relevant to your research.
+
+### 4. Adjust similarity thresholds
+
+Fine-tune deduplication for each entity type in `config.yaml`:
+
+```yaml
+dedup:
+  similarity_thresholds:
+    default: 0.75
+    people: 0.82      # Higher for people (more strict)
+    organizations: 0.78
+    locations: 0.80
+    events: 0.76      # Lower for events (more lenient)
+```
+
+### 5. Monitor quality
+
+Use verbose mode to see extraction quality issues:
+
+```bash
+just process-domain palestine_food_history --limit 5 --verbose
+```
+
+Look for:
+- QC warnings about missing fields
+- Automatic retry attempts
+- Merge dispute agent decisions
+- Cache hit rates

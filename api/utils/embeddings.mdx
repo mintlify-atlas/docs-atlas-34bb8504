@@ -1,0 +1,545 @@
+---
+title: "Embeddings"
+description: "Unified embedding generation with cloud/local providers and LRU caching"
+icon: "vector-square"
+---
+
+## Overview
+
+The embeddings module provides a unified interface for generating text embeddings through multiple providers (cloud APIs or local models), with intelligent caching and automatic fallback strategies.
+
+**Key Features:**
+- **Multi-provider support**: Cloud (via LiteLLM) or local (sentence-transformers)
+- **Mode flexibility**: AUTO, LOCAL, CLOUD, or HYBRID with automatic fallback
+- **Built-in caching**: Thread-safe LRU cache with fingerprint-based invalidation
+- **Batch processing**: Efficient batch embedding with per-text cache lookups
+- **Async/sync APIs**: Both async and synchronous wrappers available
+
+**Source:** `src/utils/embeddings/`
+
+---
+
+## EmbeddingManager
+
+<Warning>
+The `EmbeddingManager` is the primary interface for all embedding operations. Always use this class rather than instantiating providers directly.
+</Warning>
+
+### Constructor
+
+```python
+from src.utils.embeddings.manager import EmbeddingManager, EmbeddingMode
+
+manager = EmbeddingManager(
+    mode=EmbeddingMode.AUTO,
+    cloud_config=None,
+    local_config=None,
+    domain="guantanamo"
+)
+```
+
+<ParamField path="mode" type="EmbeddingMode" default="None">
+  Embedding generation mode. If `None`, reads from `EMBEDDING_MODE` env var or domain config.
+  
+  Options:
+  - `AUTO`: Auto-detect (local if sentence-transformers available, else cloud)
+  - `LOCAL`: Force local embedding with sentence-transformers
+  - `CLOUD`: Force cloud embedding via LiteLLM
+  - `HYBRID`: Try cloud first, fallback to local on failure
+</ParamField>
+
+<ParamField path="cloud_config" type="EmbeddingConfig" default="None">
+  Cloud provider configuration. If `None`, loads from domain config.
+</ParamField>
+
+<ParamField path="local_config" type="EmbeddingConfig" default="None">
+  Local provider configuration. If `None`, loads from domain config.
+</ParamField>
+
+<ParamField path="domain" type="str" default="guantanamo">
+  Domain name for loading configuration and cache settings.
+</ParamField>
+
+### Core Methods
+
+#### embed_text
+
+```python
+await manager.embed_text(text: str, use_cache: bool = True) -> List[float]
+```
+
+Embed a single text asynchronously with automatic caching.
+
+<ParamField path="text" type="str" required>
+  The text to embed.
+</ParamField>
+
+<ParamField path="use_cache" type="bool" default="True">
+  Whether to use LRU cache for lookup and storage.
+</ParamField>
+
+<ResponseField name="embeddings" type="List[float]">
+  The embedding vector for the input text.
+</ResponseField>
+
+<CodeGroup>
+```python Async Usage
+import asyncio
+from src.utils.embeddings.manager import EmbeddingManager
+
+manager = EmbeddingManager()
+vector = await manager.embed_text("The Guantanamo Bay detention camp")
+print(f"Embedding dimension: {len(vector)}")
+```
+
+```python Sync Usage
+from src.utils.embeddings.manager import EmbeddingManager
+
+manager = EmbeddingManager()
+vector = manager.embed_text_sync("The Guantanamo Bay detention camp")
+print(f"Embedding dimension: {len(vector)}")
+```
+</CodeGroup>
+
+---
+
+#### embed_batch
+
+```python
+await manager.embed_batch(
+    texts: List[str],
+    use_cache: bool = True
+) -> List[List[float]]
+```
+
+Embed multiple texts efficiently with per-text cache lookups.
+
+<Note>
+Batch embedding is **significantly faster** than multiple single embeddings, especially for local models which process batches in a single GPU/CPU pass.
+</Note>
+
+<ParamField path="texts" type="List[str]" required>
+  List of texts to embed.
+</ParamField>
+
+<ParamField path="use_cache" type="bool" default="True">
+  Whether to use LRU cache. Cache hits skip embedding computation.
+</ParamField>
+
+<ResponseField name="embeddings" type="List[List[float]]">
+  List of embedding vectors, one per input text (in same order).
+</ResponseField>
+
+<CodeGroup>
+```python Cache-Aware Batching
+from src.utils.embeddings.manager import EmbeddingManager
+
+manager = EmbeddingManager()
+
+texts = [
+    "Abdul Rahman Ahmed",
+    "Mohamedou Ould Slahi",
+    "Abdul Rahman Ahmed",  # Duplicate - will be cached
+]
+
+vectors = await manager.embed_batch(texts)
+print(f"Generated {len(vectors)} embeddings")
+print(f"Cache stats: {manager.cache_stats}")
+# Output: {'hits': 1, 'misses': 2, 'hit_rate': 0.33, 'size': 2}
+```
+
+```python Sync Batch with Metadata
+manager = EmbeddingManager()
+
+result = manager.embed_batch_result_sync([
+    "International Committee of the Red Cross",
+    "ICRC"
+])
+
+print(f"Model: {result.model}")
+print(f"Dimension: {result.dimension}")
+print(f"Embeddings: {len(result.embeddings)}")
+```
+</CodeGroup>
+
+---
+
+#### embed_text_result
+
+```python
+await manager.embed_text_result(text: str) -> EmbeddingResult
+```
+
+Embed a single text and return full metadata (model, dimension, usage).
+
+<ResponseField name="EmbeddingResult" type="object">
+  <Expandable title="fields">
+    <ResponseField name="embeddings" type="List[List[float]]">
+      The embedding vectors.
+    </ResponseField>
+    <ResponseField name="model" type="str">
+      Model name used to generate embeddings (e.g., `"jinaai/jina-embeddings-v3"`).
+    </ResponseField>
+    <ResponseField name="dimension" type="int">
+      Embedding dimension (e.g., 1024).
+    </ResponseField>
+    <ResponseField name="usage" type="Dict[str, int]" optional>
+      Token usage information (cloud providers only).
+    </ResponseField>
+    <ResponseField name="metadata" type="Dict[str, Any]" optional>
+      Additional provider-specific metadata.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Utility Methods
+
+#### get_active_model_name
+
+```python
+manager.get_active_model_name() -> str
+```
+
+Return the model name of the currently active provider.
+
+```python
+manager = EmbeddingManager(mode=EmbeddingMode.CLOUD)
+model = manager.get_active_model_name()
+print(model)  # "jinaai/jina-embeddings-v3"
+```
+
+---
+
+#### cache_stats
+
+```python
+manager.cache_stats -> dict
+```
+
+Return LRU cache hit/miss statistics for diagnostics.
+
+<ResponseField name="cache_stats" type="dict">
+  <Expandable title="fields">
+    <ResponseField name="hits" type="int">
+      Number of cache hits.
+    </ResponseField>
+    <ResponseField name="misses" type="int">
+      Number of cache misses.
+    </ResponseField>
+    <ResponseField name="hit_rate" type="float">
+      Hit rate as a ratio (0.0 to 1.0).
+    </ResponseField>
+    <ResponseField name="size" type="int">
+      Current number of cached items.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+```python
+manager = EmbeddingManager()
+await manager.embed_batch(["text1", "text2", "text1"])
+
+stats = manager.cache_stats
+print(f"Hit rate: {stats['hit_rate']:.1%}")  # "Hit rate: 33.3%"
+```
+
+---
+
+#### fingerprint_from_result
+
+```python
+EmbeddingManager.fingerprint_from_result(
+    result: EmbeddingResult
+) -> Optional[str]
+```
+
+Build a stable fingerprint string from an `EmbeddingResult`.
+
+Format: `"{model}:{dimension}"` (e.g., `"jinaai/jina-embeddings-v3:1024"`).
+
+Used to detect when an entity's stored embedding was produced by a different model than the currently active one.
+
+```python
+result = await manager.embed_text_result("Some text")
+fingerprint = EmbeddingManager.fingerprint_from_result(result)
+print(fingerprint)  # "jinaai/jina-embeddings-v3:1024"
+```
+
+---
+
+### Synchronous Wrappers
+
+All async methods have synchronous equivalents:
+
+| Async Method | Sync Wrapper |
+|--------------|-------------|
+| `embed_text()` | `embed_text_sync()` |
+| `embed_batch()` | `embed_batch_sync()` |
+| `embed_text_result()` | `embed_text_result_sync()` |
+| — | `embed_batch_result_sync()` |
+
+<Note>
+Sync wrappers use a persistent event loop to avoid `asyncio.run()` overhead per call.
+</Note>
+
+---
+
+## Embedding Providers
+
+### Base Classes
+
+#### EmbeddingConfig
+
+```python
+from src.utils.embeddings.base import EmbeddingConfig
+
+config = EmbeddingConfig(
+    model_name="jinaai/jina-embeddings-v3",
+    batch_size=32,
+    max_retries=3,
+    timeout=30,
+    device="auto",
+    metadata={"project": "hinbox"}
+)
+```
+
+<ParamField path="model_name" type="str" required>
+  Model identifier (e.g., `"jinaai/jina-embeddings-v3"`, `"text-embedding-3-small"`).
+</ParamField>
+
+<ParamField path="batch_size" type="int" default="32">
+  Number of texts to process in a single batch.
+</ParamField>
+
+<ParamField path="max_retries" type="int" default="3">
+  Maximum retry attempts for cloud API calls.
+</ParamField>
+
+<ParamField path="timeout" type="int" default="30">
+  Request timeout in seconds (cloud providers only).
+</ParamField>
+
+<ParamField path="device" type="str" default="auto">
+  Device for local models: `"auto"`, `"cpu"`, `"cuda"`, or `"mps"`. 
+  `"auto"` lets sentence-transformers choose the best available device.
+</ParamField>
+
+<ParamField path="metadata" type="Dict[str, Any]" default="{}">
+  Additional metadata to attach to API calls.
+</ParamField>
+
+---
+
+#### EmbeddingResult
+
+Returned by `embed_text_result()` and provider `embed_batch()` methods.
+
+See [embed_text_result](#embed_text_result) for field details.
+
+---
+
+### CloudEmbeddingProvider
+
+**Source:** `src/utils/embeddings/cloud.py`
+
+Cloud embedding provider using LiteLLM for multi-provider API access.
+
+<Info>
+Supports any embedding model available through LiteLLM, including OpenAI, Jina AI, Cohere, and others.
+</Info>
+
+```python
+from src.utils.embeddings.cloud import CloudEmbeddingProvider
+from src.utils.embeddings.base import EmbeddingConfig
+
+config = EmbeddingConfig(
+    model_name="jinaai/jina-embeddings-v3",
+    batch_size=100,
+    max_retries=3,
+    metadata={"project": "hinbox"}
+)
+
+provider = CloudEmbeddingProvider(config)
+vector = await provider.embed_single("The detention camp at Guantanamo Bay")
+```
+
+**Key Features:**
+- Exponential backoff retry with configurable attempts
+- Empty text filtering (returns empty vectors)
+- Usage tracking (token counts)
+- Metadata propagation to LiteLLM callbacks
+
+---
+
+### LocalEmbeddingProvider
+
+**Source:** `src/utils/embeddings/local.py`
+
+Local embedding provider using sentence-transformers (PyTorch).
+
+<Warning>
+Requires the `local-embeddings` extra: `pip install 'hinbox[local-embeddings]'`
+
+The provider lazily imports `sentence-transformers` only when first used, so environments without PyTorch can still run the application in cloud mode.
+</Warning>
+
+```python
+from src.utils.embeddings.local import LocalEmbeddingProvider
+from src.utils.embeddings.base import EmbeddingConfig
+
+config = EmbeddingConfig(
+    model_name="jinaai/jina-embeddings-v3",  # or "huggingface/..."
+    batch_size=32,
+    device="auto"  # or "cuda", "cpu", "mps"
+)
+
+provider = LocalEmbeddingProvider(config)
+vectors = await provider.embed_batch(["text1", "text2"])
+```
+
+**Model Name Transformations:**
+- `huggingface/...` → removes prefix (sentence-transformers default)
+- `jina_ai/...` → converts to `jinaai/...` (sentence-transformers format)
+
+**Device Resolution:**
+- `"auto"`: Let sentence-transformers auto-detect (CUDA > MPS > CPU)
+- `"cuda"`, `"cpu"`, `"mps"`: Explicit device selection
+
+---
+
+## Global Manager
+
+### get_default_manager
+
+```python
+from src.utils.embeddings.manager import get_default_manager
+
+manager = get_default_manager()
+vector = await manager.embed_text("Some text")
+```
+
+Returns a singleton `EmbeddingManager` instance with default configuration.
+
+<Warning>
+The default manager is lazily initialized on first call. Subsequent calls return the same instance.
+</Warning>
+
+---
+
+## Configuration
+
+### Domain Config
+
+Embedding configuration is typically loaded from domain YAML:
+
+```yaml configs/guantanamo/config.yaml
+embeddings:
+  mode: auto  # auto | local | cloud | hybrid
+  
+  cloud:
+    model: jinaai/jina-embeddings-v3
+    batch_size: 100
+    max_retries: 3
+    timeout: 30
+  
+  local:
+    model: jinaai/jina-embeddings-v3
+    batch_size: 32
+    device: auto
+
+cache:
+  enabled: true
+  embeddings:
+    lru_max_items: 4096  # Set to 0 to disable LRU cache
+```
+
+### Environment Variables
+
+<ParamField path="EMBEDDING_MODE" type="str">
+  Override embedding mode: `auto`, `local`, `cloud`, or `hybrid`.
+  Takes precedence over domain config.
+</ParamField>
+
+```bash
+export EMBEDDING_MODE=local
+python process_and_extract.py
+```
+
+---
+
+## Advanced Usage
+
+### Hybrid Mode with Fallback
+
+```python
+from src.utils.embeddings.manager import EmbeddingManager, EmbeddingMode
+
+# Try cloud first, fallback to local if cloud fails
+manager = EmbeddingManager(mode=EmbeddingMode.HYBRID)
+
+try:
+    vector = await manager.embed_text("Important text")
+    # Cloud provider used
+except Exception:
+    # Automatically fell back to local provider
+    pass
+```
+
+---
+
+### Custom Provider Configuration
+
+```python
+from src.utils.embeddings.manager import EmbeddingManager, EmbeddingMode
+from src.utils.embeddings.base import EmbeddingConfig
+
+cloud_config = EmbeddingConfig(
+    model_name="text-embedding-3-large",
+    batch_size=50,
+    metadata={"project": "hinbox", "domain": "custom"}
+)
+
+local_config = EmbeddingConfig(
+    model_name="huggingface/sentence-transformers/all-MiniLM-L6-v2",
+    batch_size=64,
+    device="cuda"
+)
+
+manager = EmbeddingManager(
+    mode=EmbeddingMode.HYBRID,
+    cloud_config=cloud_config,
+    local_config=local_config,
+    domain="custom"
+)
+```
+
+---
+
+### Cache Fingerprint Validation
+
+```python
+from src.utils.embeddings.manager import EmbeddingManager
+
+manager = EmbeddingManager()
+
+# Embed and get fingerprint
+result = await manager.embed_text_result("Entity name")
+fingerprint = EmbeddingManager.fingerprint_from_result(result)
+
+# Later: check if stored embedding matches current model
+stored_fingerprint = "jinaai/jina-embeddings-v3:1024"
+current_fingerprint = manager.fingerprint_from_result(result)
+
+if stored_fingerprint != current_fingerprint:
+    print("Re-embedding required: model changed")
+```
+
+---
+
+## See Also
+
+- [Quality Controls](/api/utils/quality-controls) - Name normalization and validation
+- [Cache Utilities](/api/utils/cache) - LRU cache implementation details
+- [Entity Merging](/api/engine/mergers) - Embedding-based similarity matching

@@ -1,0 +1,564 @@
+---
+title: "Processing Pipeline"
+description: "Deep dive into the five stages of Hinbox's entity extraction pipeline: relevance, extraction, QC, merging, and profile generation"
+---
+
+The Hinbox pipeline transforms raw historical source documents into structured entity databases through five distinct stages. Each stage is designed to maximize accuracy while minimizing computational cost.
+
+## Pipeline Overview
+
+<Steps>
+  <Step title="Relevance Filtering">
+    Determines if an article is relevant to the research domain before extraction
+  </Step>
+  
+  <Step title="Entity Extraction">
+    Extracts people, organizations, locations, and events using LLMs with structured output
+  </Step>
+  
+  <Step title="Quality Control">
+    Validates extraction results and triggers retry with repair hints on severe issues
+  </Step>
+  
+  <Step title="Entity Merging">
+    Deduplicates entities using evidence-first similarity and LLM verification
+  </Step>
+  
+  <Step title="Profile Generation">
+    Creates and maintains versioned narrative profiles for each entity
+  </Step>
+</Steps>
+
+## Stage 1: Relevance Filtering
+
+Before extracting entities, the pipeline optionally checks if an article is relevant to the research domain. This prevents wasting resources on off-topic documents.
+
+**Location**: `src/engine/relevance.py`, `src/engine/article_processor.py:70`
+
+### How It Works
+
+The relevance checker uses a domain-specific prompt loaded from `configs/<domain>/prompts/relevance.md` to determine if the article content matches the research focus.
+
+<CodeGroup>
+```python Relevance Check Implementation
+# From src/engine/article_processor.py:70
+def check_relevance(
+    self,
+    article_content: str,
+    article_id: str,
+) -> PhaseOutcome:
+    """Check whether an article is relevant to the configured domain."""
+    try:
+        if self.model_type == "ollama":
+            result = ollama_check_relevance(
+                text=article_content,
+                model=self.specific_model,
+                domain=self.domain,
+            )
+        else:
+            result = gemini_check_relevance(
+                text=article_content,
+                model=self.specific_model,
+                domain=self.domain,
+            )
+        
+        # Normalize result to boolean
+        is_relevant = bool(result.is_relevant)
+        reason = getattr(result, "reason", "")
+        
+        return PhaseOutcome.ok(
+            "relevance",
+            value=is_relevant,
+            meta={"reason": reason},
+        )
+    except Exception as e:
+        # On error, fail open (assume relevant)
+        return PhaseOutcome.fail(
+            "relevance",
+            error=e,
+            fallback=False,
+            context={"article_id": article_id},
+        )
+```
+</CodeGroup>
+
+<Info>
+Relevance checking is **optional** and controlled by the `--relevance-check` CLI flag or domain config:
+
+```yaml
+processing:
+  relevance_check: true
+```
+
+When disabled, all articles proceed directly to extraction.
+</Info>
+
+### PhaseOutcome Pattern
+
+All pipeline stages return a `PhaseOutcome` object that carries both the result value and observability metadata:
+
+<Tabs>
+  <Tab title="Success">
+    ```python
+    PhaseOutcome.ok(
+        "relevance",
+        value=True,
+        meta={"reason": "Article discusses Guantanamo detention policies"},
+    )
+    ```
+  </Tab>
+  
+  <Tab title="Failure">
+    ```python
+    PhaseOutcome.fail(
+        "relevance",
+        error=RelevanceCheckError("API timeout"),
+        fallback=False,  # assume not relevant on error
+        context={"article_id": "mh_2024_01_15_001"},
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Stage 2: Entity Extraction
+
+The extraction stage runs **concurrently for all four entity types** (people, organizations, locations, events) using Instructor with Pydantic models for structured output.
+
+**Location**: `src/engine/article_processor.py:282`, `src/engine/extractors.py`
+
+### Concurrent Extraction
+
+Within each article, entity types can be extracted in parallel using a `ThreadPoolExecutor`:
+
+<CodeGroup>
+```python Parallel Entity Extraction
+# From src/engine/article_processor.py:305
+if max_workers > 1:
+    from concurrent.futures import ThreadPoolExecutor
+    
+    with ThreadPoolExecutor(
+        max_workers=min(max_workers, len(entity_types))
+    ) as pool:
+        futures = {
+            et: pool.submit(
+                self.extract_single_entity_type,
+                et,
+                article_content,
+                article_id,
+            )
+            for et in entity_types
+        }
+        # Iterate in stable order (not completion order)
+        for et in entity_types:
+            outcome = futures[et].result()
+            entities[et] = outcome.value or []
+            extraction_outcomes[et] = outcome.to_metadata_dict()
+else:
+    # Serial extraction (max_workers=1)
+    for et in entity_types:
+        outcome = self.extract_single_entity_type(
+            et, article_content, article_id
+        )
+        entities[et] = outcome.value or []
+        extraction_outcomes[et] = outcome.to_metadata_dict()
+```
+</CodeGroup>
+
+<Note>
+The `extract_per_article` setting in domain config controls parallel entity types:
+
+```yaml
+performance:
+  concurrency:
+    extract_per_article: 4  # all 4 types in parallel
+```
+
+Set to `1` for serial extraction (useful for debugging).
+</Note>
+
+### EntityExtractor
+
+The `EntityExtractor` class provides a unified interface for both cloud (Gemini) and local (Ollama) extraction:
+
+**Location**: `src/engine/extractors.py`
+
+<Accordion title="Extractor Interface">
+```python
+class EntityExtractor:
+    def __init__(self, entity_type: str, domain: str):
+        self.entity_type = entity_type
+        self.domain = domain
+        self.prompt = DomainConfig(domain).load_prompt(entity_type)
+        self.model_class = # ... dynamically loaded Pydantic model
+    
+    def extract_cloud(
+        self,
+        text: str,
+        model: str = CLOUD_MODEL,
+        temperature: float = 0,
+        repair_hint: Optional[str] = None,
+    ) -> List[BaseModel]:
+        """Extract entities using cloud LLM (Gemini)."""
+    
+    def extract_local(
+        self,
+        text: str,
+        model: str = OLLAMA_MODEL,
+        temperature: float = 0,
+        repair_hint: Optional[str] = None,
+    ) -> List[BaseModel]:
+        """Extract entities using local LLM (Ollama)."""
+```
+</Accordion>
+
+### Extraction Caching
+
+Extraction results are cached in sidecar JSON files keyed by:
+- Content hash (SHA-256 of article text)
+- Model name and temperature
+- Prompt template hash
+- Pydantic schema hash
+
+**Location**: `src/utils/extraction_cache.py`
+
+Cache hits skip expensive LLM calls entirely, providing **10-100x speedup** on re-runs.
+
+```
+data/<domain>/entities/cache/extractions/
+├── a3f2e1b4c9d8..._people.json
+├── a3f2e1b4c9d8..._organizations.json
+└── ...
+```
+
+## Stage 3: Quality Control & Retry
+
+After extraction, each entity type goes through quality control checks. Severe issues trigger a **single retry attempt** with a repair hint.
+
+**Location**: `src/engine/article_processor.py:153`, `src/utils/quality_controls.py`
+
+### QC Checks
+
+<CardGroup cols={2}>
+  <Card title="Missing Required Fields">
+    Drops entities lacking mandatory fields (name, type, etc.)
+  </Card>
+  
+  <Card title="Within-Article Duplicates">
+    Deduplicates entities with identical normalized names
+  </Card>
+  
+  <Card title="Low-Quality Names">
+    Flags generic plurals like "defense departments" or "military bases"
+  </Card>
+  
+  <Card title="Zero Entities">
+    Triggers retry if extraction returned an empty list for a relevant article
+  </Card>
+</CardGroup>
+
+### Retry Logic
+
+When severe QC flags are detected, the extractor retries **once** with a repair hint appended to the system prompt:
+
+<CodeGroup>
+```python QC Retry Flow
+# From src/engine/article_processor.py:175
+# Attempt 1
+raw_dicts = self._run_extraction(extractor, article_content)
+cleaned, qc_report = run_extraction_qc(
+    entity_type=entity_type,
+    entities=raw_dicts,
+    domain=self.domain,
+)
+
+# Conditional retry
+if _should_retry_extraction(qc_report.flags):
+    logger.info(f"Retrying {entity_type} extraction (triggers: {qc_report.flags})")
+    
+    hint = _build_repair_hint(entity_type, qc_report.flags)
+    raw_dicts_v2 = self._run_extraction(
+        extractor, article_content, repair_hint=hint
+    )
+    cleaned_v2, qc_report_v2 = run_extraction_qc(
+        entity_type=entity_type,
+        entities=raw_dicts_v2,
+        domain=self.domain,
+    )
+    
+    # Pick the better result (higher output_count wins)
+    use_v2 = qc_report_v2.output_count > qc_report.output_count
+    if use_v2:
+        cleaned, qc_report = cleaned_v2, qc_report_v2
+```
+</CodeGroup>
+
+<Info>
+**Retry trigger flags**:
+- `zero_entities` — extraction returned empty list
+- `high_drop_rate` — >30% of entities dropped due to missing fields
+- `many_duplicates` — >20% duplicate names
+- `many_low_quality_names` — >30% generic/plural names
+</Info>
+
+### Repair Hints
+
+Repair hints describe what went wrong on the first attempt:
+
+<Tabs>
+  <Tab title="Zero Entities">
+    ```
+    IMPORTANT — Previous extraction of people had quality issues 
+    (zero_entities). Please ensure all required fields are populated, 
+    avoid duplicate entries, and return every relevant entity found 
+    in the text as a complete JSON array.
+    ```
+  </Tab>
+  
+  <Tab title="Low-Quality Names">
+    ```
+    IMPORTANT — Previous extraction of organizations had quality issues 
+    (many_low_quality_names). Use proper nouns for entity names — avoid 
+    generic plurals like 'defense departments' or descriptive phrases 
+    like 'military base in Cuba'. Name each entity with its specific, 
+    official name.
+    ```
+  </Tab>
+</Tabs>
+
+## Stage 4: Entity Merging
+
+The merger deduplicates entities across articles using an **evidence-first cascade** from cheap to expensive checks.
+
+**Location**: `src/engine/mergers.py:110`
+
+### Merge Decision Cascade
+
+<Steps>
+  <Step title="Exact key match">
+    If entity key (e.g., `"John Doe"` or `("ACLU", "legal")`) exists, merge immediately without further checks.
+  </Step>
+  
+  <Step title="Lexical blocking (RapidFuzz)">
+    Fast fuzzy string matching narrows candidates to ~50 entities (threshold: 60/100).
+    
+    **Location**: `src/engine/mergers.py`, uses RapidFuzz library
+  </Step>
+  
+  <Step title="Evidence text embeddings">
+    Build evidence text from article mentions + context windows, embed it, and compute cosine similarity against existing entities.
+    
+    **Thresholds** (from `configs/guantanamo/config.yaml`):
+    - People: 0.82
+    - Organizations: 0.78
+    - Locations: 0.80
+    - Events: 0.76
+  </Step>
+  
+  <Step title="LLM match check (temperature=0)">
+    Deterministic yes/no/uncertain decision using article text + existing profile.
+    
+    **Location**: `src/engine/match_checker.py`
+  </Step>
+  
+  <Step title="Dispute agent (gray band)">
+    When match checker returns "uncertain" or confidence falls in gray band (0.60-0.75), a second LLM arbitrates with chain-of-thought reasoning.
+    
+    **Location**: `src/engine/merge_dispute_agent.py`
+  </Step>
+</Steps>
+
+### Evidence-First Similarity
+
+Instead of embedding LLM-generated profile narratives, Hinbox embeds **evidence text** built from actual article mentions:
+
+<CodeGroup>
+```python Evidence Text Construction
+# From src/engine/mergers.py (conceptual)
+def _build_evidence_text(
+    entity_name: str,
+    article_text: str,
+    max_chars: int = 1500,
+    window_chars: int = 240,
+    max_windows: int = 3,
+) -> str:
+    """
+    Build evidence text from article mentions with context windows.
+    
+    Example output:
+    "John Doe, detainee, described in source as: 'John Doe was 
+    transferred to Guantanamo in 2002 after being captured in 
+    Afghanistan...' [240 chars] '...Doe's lawyer filed a habeas 
+    corpus petition...' [240 chars]"
+    """
+```
+</CodeGroup>
+
+This provides **apples-to-apples comparison** during similarity search: new entity evidence vs. existing entity evidence.
+
+<Note>
+Evidence parameters are configurable per domain:
+
+```yaml
+merge_evidence:
+  max_chars: 1500      # total evidence text length
+  window_chars: 240    # context window size around mentions
+  max_windows: 3       # max context windows to extract
+```
+</Note>
+
+### Canonical Name Selection
+
+When merging entities, Hinbox picks the **best canonical name** based on:
+- **Specificity**: Longer, more complete names ("Barack H. Obama" > "Barack Obama")
+- **Frequency**: Names appearing in more articles
+- **Officialness**: Names matching known acronyms or formal titles
+
+**Location**: `src/utils/name_variants.py:score_canonical_name`
+
+### Name Variants & Equivalence
+
+Domains can define equivalence groups for known aliases:
+
+<CodeGroup>
+```yaml Equivalence Groups (configs/guantanamo/config.yaml)
+dedup:
+  name_variants:
+    organizations:
+      equivalence_groups:
+        - ["Department of Defense", "Defense Department", "DoD", "Pentagon"]
+        - ["American Civil Liberties Union", "ACLU"]
+        - ["Joint Task Force Guantanamo", "JTF-GTMO", "JTF GTMO"]
+    locations:
+      equivalence_groups:
+        - ["Guantanamo Bay", "Guantanamo", "GTMO", "Naval Station Guantanamo Bay"]
+        - ["United States", "U.S.", "US"]
+```
+</CodeGroup>
+
+Equivalence groups enable **instant blocking** without LLM calls.
+
+## Stage 5: Profile Generation
+
+Once entities are merged, Hinbox generates (or updates) a **versioned narrative profile** for each entity.
+
+**Location**: `src/engine/profiles.py`
+
+### VersionedProfile
+
+Profiles maintain a complete version history, enabling temporal analysis:
+
+<CodeGroup>
+```python Profile Versioning
+class VersionedProfile(BaseModel):
+    """Container for versioned profile history."""
+    
+    current_version: int = 1
+    versions: List[ProfileVersion] = Field(default_factory=list)
+    
+    def add_version(
+        self, 
+        profile_data: Dict, 
+        trigger_article_id: Optional[str] = None
+    ) -> ProfileVersion:
+        """Add a new version to the history."""
+        new_version = ProfileVersion(
+            version_number=len(self.versions) + 1,
+            profile_data=copy.deepcopy(profile_data),
+            trigger_article_id=trigger_article_id,
+        )
+        self.versions.append(new_version)
+        self.current_version = new_version.version_number
+        return new_version
+```
+</CodeGroup>
+
+<Info>
+Profile versioning is controlled by the `ENABLE_PROFILE_VERSIONING` constant in `src/constants.py`. When enabled, every profile update creates a new version with timestamp and triggering article ID.
+</Info>
+
+### Profile QC & Grounding
+
+After profile generation, Hinbox runs a **grounding verification** batch job to ensure claims are supported by source articles.
+
+**Location**: `src/utils/quality_controls.py:verify_profile_grounding`
+
+The grounding report includes:
+- **Citation extraction**: Parse `[article_id]` citations from profile text
+- **Claim verification**: Check each claim against source article text
+- **Grounding score**: Percentage of verified citations (0.0-1.0)
+
+<Tabs>
+  <Tab title="Well-Grounded Profile">
+    ```json
+    {
+      "total_citations": 5,
+      "verified": 5,
+      "unverified": 0,
+      "grounding_score": 1.0,
+      "profile_text_hash": "a3f2e1b4c9d8..."
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Poorly-Grounded Profile">
+    ```json
+    {
+      "total_citations": 8,
+      "verified": 3,
+      "unverified": 5,
+      "grounding_score": 0.375,
+      "profile_text_hash": "b2c4f8a1e9d3...",
+      "issues": ["Citation [mh_2024_01_20_003] not found in article text"]
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Pipeline Metrics
+
+At the end of processing, the pipeline logs comprehensive statistics:
+
+<CodeGroup>
+```plaintext Example Output
+Processing complete
+
+Articles read: 100
+Articles processed: 87
+Articles skipped (relevance): 8
+Articles skipped (already processed): 5
+
+Final entity counts:
+• People: 342
+• Organizations: 156
+• Locations: 89
+• Events: 203
+
+Reflection statistics:
+• Total reflection attempts: 42
+• Average reflection attempts per article: 0.48
+
+Grounding complete: 234 verified, 301 unchanged, 256 no citations
+```
+</CodeGroup>
+
+**Location**: `src/process_and_extract.py:366`
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Entity Types" icon="shapes" href="/concepts/entities">
+    Learn about entity structure, required fields, and tags
+  </Card>
+  
+  <Card title="Domain Configuration" icon="gear" href="/concepts/domains">
+    Configure prompts, thresholds, and categories for your research
+  </Card>
+  
+  <Card title="System Architecture" icon="diagram-project" href="/concepts/architecture">
+    Understand the producer-consumer model and sidecar files
+  </Card>
+  
+  <Card title="Running the Pipeline" icon="play" href="/quickstart">
+    Process your first batch of historical sources
+  </Card>
+</CardGroup>

@@ -1,0 +1,386 @@
+---
+title: Processing Articles
+description: Extract entities from your historical sources using AI-powered extraction
+---
+
+Once you've configured your research domain, you can process your historical sources to extract entities. Hinbox uses AI models to identify people, organizations, locations, and events, then merges and deduplicates them into a structured knowledge base.
+
+## Basic Processing
+
+Process all articles in your domain:
+
+```bash
+just process-domain guantanamo
+```
+
+This command:
+1. Loads articles from your configured data source
+2. Checks relevance to your research domain
+3. Extracts entities using AI models
+4. Merges and deduplicates entities
+5. Saves results to Parquet files
+
+## Processing Options
+
+### Limit Number of Articles
+
+Process only a specific number of articles:
+
+```bash
+# Process just 5 articles
+just process-domain guantanamo --limit 5
+```
+
+<Note>
+  Use `--limit` when testing your configuration or exploring a new dataset.
+  Start small (2-5 articles) to verify extraction quality before processing
+  thousands of documents.
+</Note>
+
+### Verbose Output
+
+See detailed extraction information:
+
+```bash
+just process-domain guantanamo --verbose
+```
+
+Verbose mode shows:
+- Relevance check decisions
+- Extracted entity counts per article
+- Merge decisions (new vs. existing entities)
+- Processing times per stage
+
+### Force Reprocessing
+
+Reprocess articles even if already processed:
+
+```bash
+just process-domain guantanamo --force
+```
+
+<Warning>
+  By default, Hinbox skips articles that have already been processed. Use
+  `--force` to reprocess everything, which is useful after updating prompts
+  or entity definitions.
+</Warning>
+
+### Combined Options
+
+```bash
+# Test configuration: process 2 articles with verbose output
+just process-domain guantanamo --limit 2 --verbose --force
+```
+
+## Processing Pipeline
+
+The processing pipeline consists of several stages:
+
+<Steps>
+  <Step title="Load Articles">
+    Hinbox reads articles from your configured Parquet file:
+    
+    ```yaml
+    # In config.yaml
+    data_sources:
+      default_path: "data/guantanamo/raw_sources/miami_herald_articles.parquet"
+    ```
+    
+    Required columns: `title`, `content`, `url`, `published_date`, `source_type`
+  </Step>
+
+  <Step title="Check Relevance">
+    The relevance checker filters out articles not relevant to your research domain:
+    
+    ```bash
+    # In logs:
+    ✓ Article is relevant to guantanamo research (confidence: 0.95)
+    ⊗ Article skipped (not relevant to domain)
+    ```
+    
+    Configure in `config.yaml`:
+    ```yaml
+    processing:
+      relevance_check: true  # Set to false to skip this step
+    ```
+  </Step>
+
+  <Step title="Extract Entities">
+    For each relevant article, Hinbox extracts all four entity types in parallel:
+    
+    - **People**: Individuals mentioned in the text
+    - **Organizations**: Groups, agencies, companies, institutions
+    - **Locations**: Places, facilities, geographic regions
+    - **Events**: Significant occurrences with dates
+    
+    Extraction uses prompts from `configs/your_domain/prompts/`
+  </Step>
+
+  <Step title="Merge & Deduplicate">
+    Extracted entities are merged with existing entities using:
+    
+    - **Lexical blocking**: Fast fuzzy string matching (RapidFuzz)
+    - **Embedding similarity**: Semantic similarity using embedding models
+    - **LLM match checking**: AI verification for ambiguous cases
+    
+    Example merge decisions:
+    ```bash
+    NEW person: Carol Rosenberg (journalist)
+    MERGE person: C. Rosenberg → Carol Rosenberg (similarity: 0.89)
+    SKIP person: Carol Rosenberg (exact duplicate)
+    ```
+  </Step>
+
+  <Step title="Save Results">
+    Updated entities are written to Parquet files:
+    
+    ```
+    data/guantanamo/entities/
+    ├── people.parquet
+    ├── organizations.parquet
+    ├── locations.parquet
+    └── events.parquet
+    ```
+    
+    Processing status is tracked in a sidecar file to avoid reprocessing.
+  </Step>
+</Steps>
+
+## Understanding the Output
+
+### Console Output
+
+During processing, you'll see structured log output:
+
+```bash
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Processing Article 1/100
+Title: "Guantanamo detainee released after 14 years"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ Article is relevant (confidence: 0.92)
+
+Extracting entities...
+  ✓ Extracted 5 people
+  ✓ Extracted 3 organizations
+  ✓ Extracted 2 locations
+  ✓ Extracted 1 event
+
+Merging entities...
+  • NEW person: Abdul Rahman (detainee)
+  • MERGE person: Defense Department → Department of Defense
+  • SKIP person: Carol Rosenberg (duplicate)
+
+✓ Processing complete (4.2s)
+```
+
+### Entity Files
+
+Each entity type is saved to a separate Parquet file with these columns:
+
+**People** (`people.parquet`):
+- `name`: Person's name
+- `type`: Person type (detainee, lawyer, journalist, etc.)
+- `profile`: Generated profile with tags and narrative text
+- `aliases`: Alternative names
+- `confidence`: Extraction confidence score
+- `articles`: List of source articles
+- `last_updated`: Last modification timestamp
+
+**Organizations** (`organizations.parquet`):
+- `name`: Organization name
+- `type`: Organization type
+- `profile`: Description and context
+- `aliases`: Alternative names and acronyms
+- `articles`: Source articles
+
+**Locations** (`locations.parquet`):
+- `name`: Location name
+- `type`: Location type
+- `profile`: Geographic and contextual information
+- `articles`: Source articles
+
+**Events** (`events.parquet`):
+- `title`: Event name
+- `type`: Event type
+- `start_date`: Event date
+- `profile`: Event description and context
+- `articles`: Source articles
+
+## Advanced Processing
+
+### Local Model Processing
+
+Use local Ollama models instead of cloud APIs:
+
+```bash
+just process-domain guantanamo --local
+```
+
+Requires Ollama installed with a compatible model (e.g., `llama3.1:8b`).
+
+### Concurrency Settings
+
+Configure parallel processing in `config.yaml`:
+
+```yaml
+performance:
+  concurrency:
+    extract_workers: 8        # Parallel articles
+    extract_per_article: 4    # Parallel entity types per article
+    llm_in_flight: 16         # Max concurrent API calls
+```
+
+<Note>
+  Higher concurrency speeds up processing but increases API costs and memory
+  usage. Start with defaults and adjust based on your needs.
+</Note>
+
+### Extraction Caching
+
+Hinbox caches extraction results to avoid reprocessing unchanged articles:
+
+```yaml
+cache:
+  enabled: true
+  extraction:
+    enabled: true
+    subdir: "cache/extractions"
+    version: 1  # Bump to invalidate cache
+  articles:
+    skip_if_unchanged: true  # Skip if content hash matches
+```
+
+Cache is keyed on:
+- Article content hash
+- Model name
+- Prompt text
+- Schema structure
+- Temperature setting
+
+### Batch Processing
+
+Process articles in batches:
+
+```yaml
+processing:
+  batch_size: 5  # Process 5 articles before merging
+```
+
+## Monitoring Progress
+
+Check processing statistics:
+
+```bash
+just check
+```
+
+Output:
+```
+Article Database Statistics
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Total articles: 1,245
+Processed: 856 (68.7%)
+Skipped (not relevant): 123 (9.9%)
+Pending: 266 (21.4%)
+```
+
+## Troubleshooting
+
+### Extraction Quality Issues
+
+**Problem**: Entities not extracted correctly
+
+**Solutions**:
+1. Review extraction prompts in `configs/your_domain/prompts/`
+2. Add more specific examples to your entity type definitions
+3. Test with `--verbose` to see extraction decisions
+4. Adjust prompts based on your source types (books vs. articles)
+
+### Deduplication Problems
+
+**Problem**: Same entity appearing multiple times
+
+**Solutions**:
+1. Adjust similarity thresholds in `config.yaml`:
+   ```yaml
+   dedup:
+     similarity_thresholds:
+       people: 0.82  # Higher = more strict
+   ```
+2. Add name variant equivalence groups:
+   ```yaml
+   dedup:
+     name_variants:
+       organizations:
+         equivalence_groups:
+           - ["Department of Defense", "DoD", "Pentagon"]
+   ```
+
+### Performance Issues
+
+**Problem**: Processing too slow
+
+**Solutions**:
+1. Increase concurrency settings (see above)
+2. Enable extraction caching
+3. Use local models for faster processing
+4. Process in smaller batches with `--limit`
+
+### API Rate Limits
+
+**Problem**: Cloud API rate limit errors
+
+**Solutions**:
+1. Reduce `llm_in_flight` concurrency
+2. Switch to local model processing with `--local`
+3. Process in smaller batches
+
+## Processing Workflow
+
+Recommended workflow for a new domain:
+
+<Steps>
+  <Step title="Test with small sample">
+    ```bash
+    just process-domain your_domain --limit 2 --verbose
+    ```
+  </Step>
+
+  <Step title="Review extraction quality">
+    Check output files and adjust prompts/categories as needed
+  </Step>
+
+  <Step title="Process larger sample">
+    ```bash
+    just process-domain your_domain --limit 50
+    ```
+  </Step>
+
+  <Step title="Check deduplication">
+    Browse entities in web interface, adjust thresholds if needed
+  </Step>
+
+  <Step title="Process full dataset">
+    ```bash
+    just process-domain your_domain
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Web Interface" href="/guides/web-interface">
+    Browse and explore your extracted entities
+  </Card>
+  <Card title="Configuration" href="/guides/configuration">
+    Fine-tune deduplication and performance settings
+  </Card>
+  <Card title="Data Format" href="/guides/data-format">
+    Understand the output Parquet schema
+  </Card>
+  <Card title="Creating Domains" href="/guides/creating-domains">
+    Refine your domain configuration
+  </Card>
+</CardGroup>

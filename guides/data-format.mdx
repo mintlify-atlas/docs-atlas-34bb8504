@@ -1,0 +1,586 @@
+---
+title: Data Format Requirements
+description: Input and output data format specifications for Hinbox
+---
+
+Hinbox processes historical sources stored in **Apache Parquet** format and outputs extracted entities as Parquet files. This page documents the required schemas and data format requirements.
+
+## Input Data Format
+
+Source articles must be provided as a Parquet file with the following schema:
+
+### Required Columns
+
+<ParamField path="title" type="string" required>
+  **Article title or headline**
+  
+  Examples:
+  - "Guantanamo detainee released after 14 years"
+  - "Soviet forces withdraw from Afghanistan"
+  - "Traditional Palestinian food practices documented"
+</ParamField>
+
+<ParamField path="content" type="string" required>
+  **Full text content of the article**
+  
+  This is the main text from which entities are extracted. Should be clean,
+  readable text without excessive HTML/markup.
+  
+  Recommended length: 500-5000 words. Shorter articles may not yield many entities;
+  longer articles are automatically chunked.
+</ParamField>
+
+<ParamField path="url" type="string" required>
+  **Source URL or identifier**
+  
+  Can be a web URL, DOI, archive identifier, or local file path. Used for
+  citations and source tracking.
+  
+  Examples:
+  - `https://example.com/articles/2024-01-15-story`
+  - `doi:10.1234/journal.2024.001`
+  - `archive://folder/document_123.pdf`
+</ParamField>
+
+<ParamField path="published_date" type="string" required>
+  **Publication or creation date**
+  
+  ISO 8601 format recommended: `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`
+  
+  Examples:
+  - `2024-03-15`
+  - `2024-03-15T14:30:00`
+  - `1989-02-15` (historical date)
+</ParamField>
+
+<ParamField path="source_type" type="string" required>
+  **Type of source document**
+  
+  Used for relevance checking and extraction prompt context.
+  
+  Common values:
+  - `news_article`
+  - `journal_article`
+  - `book_chapter`
+  - `archival_document`
+  - `thesis`
+  - `report`
+  - `interview_transcript`
+</ParamField>
+
+### Optional Columns
+
+Additional columns are preserved but not used by Hinbox:
+
+- `author` - Article author(s)
+- `source_name` - Publication name (e.g., "Miami Herald")
+- `language` - Language code (e.g., "en", "ar")
+- `keywords` - Article keywords/tags
+
+These columns pass through to output files unchanged.
+
+### Example Input Schema
+
+```python
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+# Define schema
+schema = pa.schema([
+    ('title', pa.string()),
+    ('content', pa.string()),
+    ('url', pa.string()),
+    ('published_date', pa.string()),
+    ('source_type', pa.string()),
+    # Optional fields
+    ('author', pa.string()),
+    ('source_name', pa.string()),
+])
+
+# Create sample data
+data = [
+    {
+        'title': 'Guantanamo detainee released after 14 years',
+        'content': 'A detainee held at Guantánamo Bay for 14 years...',
+        'url': 'https://example.com/article/2024-03-15',
+        'published_date': '2024-03-15',
+        'source_type': 'news_article',
+        'author': 'Carol Rosenberg',
+        'source_name': 'Miami Herald',
+    }
+]
+
+# Write to Parquet
+table = pa.Table.from_pylist(data, schema=schema)
+pq.write_table(table, 'articles.parquet')
+```
+
+## Output Data Format
+
+Hinbox outputs four Parquet files per domain, one for each entity type:
+
+```
+data/your_domain/entities/
+├── people.parquet
+├── organizations.parquet
+├── locations.parquet
+└── events.parquet
+```
+
+### People Schema
+
+```python
+schema = pa.schema([
+    ('name', pa.string()),              # Person's name
+    ('type', pa.string()),              # Person type (e.g., 'detainee', 'lawyer')
+    ('profile', pa.struct([             # Profile information
+        ('text', pa.string()),          # Narrative profile text
+        ('tags', pa.list_(pa.string())), # Profile tags
+        ('confidence', pa.float64()),   # Profile confidence score
+    ])),
+    ('aliases', pa.list_(pa.string())), # Alternative names
+    ('articles', pa.list_(pa.struct([  # Source articles
+        ('article_id', pa.string()),
+        ('title', pa.string()),
+        ('url', pa.string()),
+        ('published_date', pa.string()),
+        ('extraction_timestamp', pa.string()),
+    ]))),
+    ('confidence', pa.float64()),       # Overall confidence
+    ('created_at', pa.string()),        # Creation timestamp
+    ('last_updated', pa.string()),      # Last update timestamp
+    ('version', pa.int64()),            # Profile version number (if versioning enabled)
+])
+```
+
+**Example record**:
+
+```json
+{
+  "name": "Carol Rosenberg",
+  "type": "journalist",
+  "profile": {
+    "text": "Carol Rosenberg is a journalist who has covered Guantánamo Bay...",
+    "tags": [],
+    "confidence": 0.92
+  },
+  "aliases": ["C. Rosenberg"],
+  "articles": [
+    {
+      "article_id": "article_123",
+      "title": "Guantanamo detainee released",
+      "url": "https://example.com/article",
+      "published_date": "2024-03-15",
+      "extraction_timestamp": "2024-03-15T10:30:00"
+    }
+  ],
+  "confidence": 0.89,
+  "created_at": "2024-03-15T10:30:00",
+  "last_updated": "2024-03-15T10:30:00",
+  "version": 1
+}
+```
+
+### Organizations Schema
+
+```python
+schema = pa.schema([
+    ('name', pa.string()),              # Organization name
+    ('type', pa.string()),              # Organization type
+    ('profile', pa.struct([             # Profile information
+        ('text', pa.string()),
+        ('tags', pa.list_(pa.string())),
+        ('confidence', pa.float64()),
+    ])),
+    ('aliases', pa.list_(pa.string())), # Acronyms and alternative names
+    ('articles', pa.list_(pa.struct([  # Source articles
+        ('article_id', pa.string()),
+        ('title', pa.string()),
+        ('url', pa.string()),
+        ('published_date', pa.string()),
+        ('extraction_timestamp', pa.string()),
+    ]))),
+    ('confidence', pa.float64()),
+    ('created_at', pa.string()),
+    ('last_updated', pa.string()),
+])
+```
+
+**Example record**:
+
+```json
+{
+  "name": "Department of Defense",
+  "type": "military",
+  "profile": {
+    "text": "The Department of Defense (DoD) is responsible for...",
+    "tags": [],
+    "confidence": 0.95
+  },
+  "aliases": ["Defense Department", "DoD", "Pentagon"],
+  "articles": [...],
+  "confidence": 0.91,
+  "created_at": "2024-03-15T10:30:00",
+  "last_updated": "2024-03-15T10:35:00"
+}
+```
+
+### Locations Schema
+
+```python
+schema = pa.schema([
+    ('name', pa.string()),              # Location name
+    ('type', pa.string()),              # Location type
+    ('profile', pa.struct([             # Profile information
+        ('text', pa.string()),
+        ('tags', pa.list_(pa.string())),
+        ('confidence', pa.float64()),
+    ])),
+    ('articles', pa.list_(pa.struct([  # Source articles
+        ('article_id', pa.string()),
+        ('title', pa.string()),
+        ('url', pa.string()),
+        ('published_date', pa.string()),
+        ('extraction_timestamp', pa.string()),
+    ]))),
+    ('confidence', pa.float64()),
+    ('created_at', pa.string()),
+    ('last_updated', pa.string()),
+])
+```
+
+**Example record**:
+
+```json
+{
+  "name": "Guantanamo Bay",
+  "type": "detention_facility",
+  "profile": {
+    "text": "Guantánamo Bay detention facility, officially known as...",
+    "tags": [],
+    "confidence": 0.94
+  },
+  "articles": [...],
+  "confidence": 0.93,
+  "created_at": "2024-03-15T10:30:00",
+  "last_updated": "2024-03-15T10:40:00"
+}
+```
+
+### Events Schema
+
+```python
+schema = pa.schema([
+    ('title', pa.string()),             # Event title
+    ('type', pa.string()),              # Event type
+    ('start_date', pa.string()),        # Event date
+    ('profile', pa.struct([             # Profile information
+        ('text', pa.string()),
+        ('tags', pa.list_(pa.string())),
+        ('confidence', pa.float64()),
+    ])),
+    ('articles', pa.list_(pa.struct([  # Source articles
+        ('article_id', pa.string()),
+        ('title', pa.string()),
+        ('url', pa.string()),
+        ('published_date', pa.string()),
+        ('extraction_timestamp', pa.string()),
+    ]))),
+    ('confidence', pa.float64()),
+    ('created_at', pa.string()),
+    ('last_updated', pa.string()),
+])
+```
+
+**Example record**:
+
+```json
+{
+  "title": "Detainee release",
+  "type": "detention",
+  "start_date": "2024-03-15",
+  "profile": {
+    "text": "A detainee was released from Guantánamo Bay on March 15...",
+    "tags": ["legal"],
+    "confidence": 0.88
+  },
+  "articles": [...],
+  "confidence": 0.85,
+  "created_at": "2024-03-15T10:30:00",
+  "last_updated": "2024-03-15T10:30:00"
+}
+```
+
+## Creating Input Data
+
+### From CSV
+
+Convert CSV to Parquet:
+
+```python
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+# Read CSV
+df = pd.read_csv('articles.csv')
+
+# Ensure required columns exist
+required = ['title', 'content', 'url', 'published_date', 'source_type']
+for col in required:
+    if col not in df.columns:
+        raise ValueError(f"Missing required column: {col}")
+
+# Convert to Parquet
+table = pa.Table.from_pandas(df)
+pq.write_table(table, 'articles.parquet')
+```
+
+### From JSON
+
+Convert JSON Lines (JSONL) to Parquet:
+
+```python
+import pyarrow as pa
+import pyarrow.parquet as pq
+import json
+
+# Read JSONL file
+data = []
+with open('articles.jsonl', 'r') as f:
+    for line in f:
+        data.append(json.loads(line))
+
+# Convert to Parquet
+table = pa.Table.from_pylist(data)
+pq.write_table(table, 'articles.parquet')
+```
+
+### From Web Scraping
+
+Example scraping script:
+
+```python
+import pyarrow as pa
+import pyarrow.parquet as pq
+from datetime import datetime
+
+# Scrape articles (pseudo-code)
+articles = []
+for url in article_urls:
+    article = scrape_article(url)
+    articles.append({
+        'title': article.title,
+        'content': article.text,
+        'url': url,
+        'published_date': article.date.isoformat(),
+        'source_type': 'news_article',
+        'author': article.author,
+        'source_name': article.publication,
+    })
+
+# Save to Parquet
+table = pa.Table.from_pylist(articles)
+pq.write_table(table, 'articles.parquet')
+```
+
+## Reading Output Data
+
+### Python
+
+```python
+import pyarrow.parquet as pq
+import pandas as pd
+
+# Read people entities
+people_table = pq.read_table('data/guantanamo/entities/people.parquet')
+people_df = people_table.to_pandas()
+
+# Access fields
+for person in people_df.itertuples():
+    print(f"{person.name} ({person.type})")
+    print(f"Profile: {person.profile['text'][:100]}...")
+    print(f"Articles: {len(person.articles)}")
+```
+
+### DuckDB
+
+```sql
+-- Query Parquet files directly
+SELECT name, type, confidence
+FROM 'data/guantanamo/entities/people.parquet'
+WHERE type = 'journalist'
+ORDER BY confidence DESC;
+```
+
+### Pandas
+
+```python
+import pandas as pd
+
+# Read all entity types
+people = pd.read_parquet('data/guantanamo/entities/people.parquet')
+orgs = pd.read_parquet('data/guantanamo/entities/organizations.parquet')
+locs = pd.read_parquet('data/guantanamo/entities/locations.parquet')
+events = pd.read_parquet('data/guantanamo/entities/events.parquet')
+
+# Filter and analyze
+journalists = people[people['type'] == 'journalist']
+print(f"Found {len(journalists)} journalists")
+```
+
+## Data Quality Guidelines
+
+### Input Data Quality
+
+<Steps>
+  <Step title="Clean text content">
+    - Remove excessive HTML/markup
+    - Fix encoding issues (UTF-8 recommended)
+    - Remove boilerplate (headers, footers, ads)
+    - Preserve paragraph structure
+  </Step>
+
+  <Step title="Consistent dates">
+    - Use ISO 8601 format: `YYYY-MM-DD`
+    - Be consistent across all articles
+    - Include timezone if available
+  </Step>
+
+  <Step title="Unique URLs">
+    - Each article should have a unique URL/identifier
+    - Used for deduplication and citation tracking
+    - Can be any stable identifier
+  </Step>
+
+  <Step title="Accurate source types">
+    - Use consistent source_type values
+    - Affects relevance checking and extraction
+    - Consider your domain's source mix
+  </Step>
+</Steps>
+
+### Output Data Quality
+
+Hinbox maintains data quality through:
+
+- **Deduplication**: Entities are merged based on similarity
+- **Confidence scores**: Low-confidence extractions can be filtered
+- **Source tracking**: Every entity links back to source articles
+- **Versioning**: Profile changes are tracked over time (optional)
+
+## Storage Recommendations
+
+### File Organization
+
+```
+data/
+├── domain1/
+│   ├── raw_sources/
+│   │   └── articles.parquet
+│   └── entities/
+│       ├── people.parquet
+│       ├── organizations.parquet
+│       ├── locations.parquet
+│       └── events.parquet
+├── domain2/
+│   ├── raw_sources/
+│   └── entities/
+└── shared_sources/
+    └── common_articles.parquet
+```
+
+### Backup Strategy
+
+1. **Version control configs**: Git tracks domain configurations
+2. **Backup source data**: Raw article Parquet files are source of truth
+3. **Backup entities**: Entity Parquet files can be regenerated but backup recommended
+4. **Export options**: Convert to CSV/JSON for archival
+
+### Performance Tips
+
+- **Parquet compression**: Use Snappy or ZSTD compression
+- **Partitioning**: Partition large datasets by date or source
+- **Column pruning**: Only read columns you need
+- **Predicate pushdown**: Filter in Parquet reader when possible
+
+Example with compression:
+
+```python
+import pyarrow.parquet as pq
+
+pq.write_table(
+    table,
+    'articles.parquet',
+    compression='snappy',  # or 'zstd' for better compression
+)
+```
+
+## Troubleshooting
+
+### Missing Required Columns
+
+**Error**: `KeyError: 'content'`
+
+**Solution**: Ensure all required columns exist in input Parquet:
+
+```python
+import pyarrow.parquet as pq
+
+table = pq.read_table('articles.parquet')
+print("Columns:", table.column_names)
+
+# Add missing columns
+if 'source_type' not in table.column_names:
+    import pyarrow.compute as pc
+    table = table.append_column(
+        'source_type',
+        pa.array(['news_article'] * len(table))
+    )
+```
+
+### Encoding Issues
+
+**Problem**: Non-ASCII characters corrupted
+
+**Solution**: Ensure UTF-8 encoding:
+
+```python
+import pandas as pd
+
+df = pd.read_csv('articles.csv', encoding='utf-8')
+df.to_parquet('articles.parquet')
+```
+
+### Large Files
+
+**Problem**: Parquet file too large to load
+
+**Solution**: Use partitioning or read in batches:
+
+```python
+import pyarrow.parquet as pq
+
+# Read in batches
+parquet_file = pq.ParquetFile('large_articles.parquet')
+for batch in parquet_file.iter_batches(batch_size=1000):
+    # Process batch
+    process_batch(batch.to_pandas())
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Processing Articles" href="/guides/processing-articles">
+    Process your prepared data
+  </Card>
+  <Card title="Creating Domains" href="/guides/creating-domains">
+    Set up domain configurations
+  </Card>
+  <Card title="Configuration" href="/guides/configuration">
+    Configure processing settings
+  </Card>
+  <Card title="Web Interface" href="/guides/web-interface">
+    Browse extracted entities
+  </Card>
+</CardGroup>

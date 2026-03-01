@@ -1,0 +1,358 @@
+---
+title: "Process & Extraction Commands"
+description: "Process articles and extract entities using cloud or local LLM models"
+---
+
+## Overview
+
+The `just process` command runs the core article processing pipeline that extracts entities (people, events, locations, organizations) from articles using either cloud-based (Gemini) or local (Ollama) language models.
+
+## Basic Usage
+
+<CodeGroup>
+```bash Process 5 articles (default)
+just process
+```
+
+```bash Process specific domain
+just process-domain guantanamo --limit 10
+```
+
+```bash Quick test run
+just test-run
+```
+</CodeGroup>
+
+## Main Command
+
+### `just process`
+
+Process articles and extract entities with full control over processing options.
+
+**Source:** `src/process_and_extract.py`
+
+<CodeGroup>
+```bash Basic usage
+just process --limit 10
+```
+
+```bash With relevance checking
+just process --relevance-check --limit 20
+```
+
+```bash Force reprocess all
+just process --force-reprocess --limit 100
+```
+
+```bash Local-only (privacy mode)
+just process --local --limit 5 -v
+```
+</CodeGroup>
+
+## Command-Line Arguments
+
+### Model Selection
+
+<ParamField path="--local" type="flag">
+  Use local approach (Ollama/spaCy) rather than cloud models (Gemini). Enforces privacy mode:
+  - Forces local embeddings
+  - Disables all LLM telemetry callbacks
+  - No data leaves your machine
+  
+  **Default:** `false` (uses Gemini)
+</ParamField>
+
+### Processing Control
+
+<ParamField path="--limit" type="integer" default="5">
+  Maximum number of articles to process in this run.
+  
+  **Examples:**
+  - `--limit 1` — Process one article (useful for testing)
+  - `--limit 100` — Process 100 articles
+  - `--limit 5` — Default behavior
+</ParamField>
+
+<ParamField path="--force-reprocess" type="flag">
+  Process articles even if they've been processed before. By default, the pipeline skips articles that have already been extracted.
+  
+  **Use cases:**
+  - Re-running after config changes
+  - Testing extraction improvements
+  - Regenerating profiles with new prompts
+  
+  **Default:** `false`
+</ParamField>
+
+<ParamField path="--relevance-check" type="flag">
+  Perform a relevance check on each article before extraction. Articles deemed irrelevant to the domain are skipped, saving processing time and API costs.
+  
+  **Default:** `false`
+</ParamField>
+
+### Domain Configuration
+
+<ParamField path="--domain" type="string" default="guantanamo">
+  Domain configuration to use for processing. Determines:
+  - Entity types to extract
+  - Extraction prompts
+  - Output directory
+  - Merge thresholds
+  
+  **Available domains:** Run `just domains` to see all configured domains.
+</ParamField>
+
+<ParamField path="--articles-path" type="path">
+  Path to the raw articles Parquet file. If not specified, uses the path from the domain configuration.
+  
+  **Example:** `--articles-path data/custom/articles.parquet`
+</ParamField>
+
+### Output & Debugging
+
+<ParamField path="--verbose" type="flag">
+  Enable verbose logging for debugging. Shows:
+  - Reflection mechanism details
+  - Entity merge decisions
+  - Quality control checks
+  - LLM interactions
+  
+  **Alias:** `-v`
+  
+  **Default:** `false`
+</ParamField>
+
+<ParamField path="--show-profiles" type="flag">
+  Display full Rich profile panels during merge. By default, compact output is used.
+  
+  **Default:** `false` (compact output)
+</ParamField>
+
+## Domain-Specific Commands
+
+### `just process-domain`
+
+Convenience command for processing a specific domain.
+
+```bash
+just process-domain <domain> [args...]
+```
+
+<ParamField path="domain" type="string" required>
+  Domain name to process (e.g., `guantanamo`)
+</ParamField>
+
+**Examples:**
+
+<CodeGroup>
+```bash Process 10 articles from specific domain
+just process-domain guantanamo --limit 10
+```
+
+```bash Verbose output with relevance checking
+just process-domain guantanamo --limit 5 -v --relevance-check
+```
+</CodeGroup>
+
+### `just test-run`
+
+Quick test: process one article with verbose output and force reprocessing.
+
+```bash
+just test-run
+```
+
+**Equivalent to:**
+```bash
+just process --limit 1 -v --force-reprocess
+```
+
+**Use cases:**
+- Testing extraction configuration
+- Debugging entity extraction issues
+- Verifying domain setup
+
+## Processing Pipeline
+
+<Steps>
+  <Step title="Load Configuration">
+    Loads domain config from `configs/<domain>/` including entity types, prompts, and thresholds.
+  </Step>
+  
+  <Step title="Load Existing Entities">
+    Reads existing entity Parquet files from `data/<domain>/output/` for merging.
+  </Step>
+  
+  <Step title="Process Articles">
+    For each article:
+    1. Check if already processed (skip unless `--force-reprocess`)
+    2. Optionally check relevance (if `--relevance-check`)
+    3. Extract entities (4 types in parallel)
+    4. Merge with existing entities
+    5. Update processing status
+  </Step>
+  
+  <Step title="Profile Grounding">
+    Verify that profile citations are supported by source text.
+  </Step>
+  
+  <Step title="Write Results">
+    Write updated entities to Parquet files:
+    - `people.parquet`
+    - `events.parquet`
+    - `locations.parquet`
+    - `organizations.parquet`
+  </Step>
+</Steps>
+
+## Output Files
+
+Processing creates/updates files in `data/<domain>/output/`:
+
+| File | Description |
+|------|-------------|
+| `people.parquet` | Extracted people entities |
+| `events.parquet` | Extracted event entities |
+| `locations.parquet` | Extracted location entities |
+| `organizations.parquet` | Extracted organization entities |
+| `processing_status.json` | Article processing status sidecar |
+| `extraction_cache/` | Cached extraction results (content-hash keyed) |
+
+## Performance & Concurrency
+
+The pipeline uses concurrent processing configured in your domain config:
+
+```yaml configs/<domain>/config.yaml
+concurrency:
+  extract_workers: 3        # Parallel article processors
+  extract_per_article: 4    # Parallel entity type extractions per article
+  llm_in_flight: 10        # Max concurrent LLM API calls
+  ollama_in_flight: 2      # Max concurrent Ollama calls (local mode)
+```
+
+<Note>
+  The pipeline uses a producer-consumer pattern:
+  - Multiple extraction workers process articles in parallel
+  - A single merge actor (main thread) consumes results in order
+  - No locking needed since only one thread writes to entities
+</Note>
+
+## Terminal Output Examples
+
+### Standard Processing
+
+```bash
+$ just process --limit 3 --relevance-check
+
+Starting script...
+Arguments: limit=3, local=False, relevance_check=True, force_reprocess=False
+Loaded 156 articles from data/guantanamo/raw_sources/miami_herald_articles.parquet
+Concurrency: 3 workers, 4 types/article, 10 LLM in-flight
+Processing status: 45 previously processed
+
+⠋ Articles ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3/3 00:02:15
+
+Merging article #1
+Merging extracted entities...
+Merged 3 people in 1.23s (new=2 merged=1 skipped=0)
+Merged 1 events in 0.45s (new=1 merged=0 skipped=0)
+Merged 2 locations in 0.89s (new=1 merged=1 skipped=0)
+Merged 0 organizations in 0.12s (new=0 merged=0 skipped=0)
+
+Running profile grounding verification...
+Grounding for people/John Doe: score=0.92, verified=3/3
+Grounding complete: 5 verified, 12 unchanged, 3 no citations
+
+Saving updated entity tables...
+Entity tables successfully saved
+
+Processing complete
+Articles read: 156
+Articles processed: 3
+Articles skipped (relevance): 0
+Articles skipped (already processed): 153
+
+Final entity counts:
+• People: 127
+• Organizations: 34
+• Locations: 56
+• Events: 23
+```
+
+### Verbose Mode Output
+
+```bash
+$ just process --limit 1 -v
+
+Verbose logging enabled
+[DEBUG] Loading domain config: guantanamo
+[DEBUG] Configuring LLM concurrency: cloud_in_flight=10
+[DEBUG] Match check memoization: enabled (8192 items)
+[DEBUG] Extraction sidecar cache: enabled (v2)
+
+Extracting entities from article abc123...
+[DEBUG] Relevance check: RELEVANT (confidence=0.87)
+[DEBUG] Extracting people... (4 entities)
+[DEBUG] Extracting events... (1 entity)
+[DEBUG] Extracting locations... (2 entities)
+[DEBUG] Extracting organizations... (0 entities)
+
+[MERGE] Person: John Smith
+  Decision: NEW
+  Confidence: 0.95
+  Aliases: ["J. Smith", "Smith"]
+
+[MERGE] Event: Detention hearing
+  Decision: MERGE with existing event (similarity=0.88)
+  Canonical name: Military commission hearing
+```
+
+## Error Handling
+
+### Common Issues
+
+<Accordion title="Articles file not found">
+  **Error:** `ERROR: Articles file not found at data/guantanamo/raw_sources/miami_herald_articles.parquet`
+  
+  **Solution:** Ensure your articles Parquet file exists, or specify the path with `--articles-path`.
+</Accordion>
+
+<Accordion title="No API key configured">
+  **Error:** `GEMINI_API_KEY environment variable not set`
+  
+  **Solution:** Set your API key in `.env` or use `--local` for local-only processing.
+  
+  ```bash .env
+  GEMINI_API_KEY=your_key_here
+  ```
+</Accordion>
+
+<Accordion title="Domain not found">
+  **Error:** `Domain 'myproject' not found`
+  
+  **Solution:** Initialize the domain first with `just init myproject`, or use an existing domain (see `just domains`).
+</Accordion>
+
+## Privacy Mode
+
+When using `--local`, the system enforces complete privacy:
+
+- ✅ All entity extraction uses Ollama (local LLM)
+- ✅ All embeddings computed locally (no OpenAI API)
+- ✅ LLM telemetry callbacks disabled
+- ✅ No data sent to external services
+
+```bash
+just process --local --limit 10
+```
+
+**Output:**
+```
+Privacy mode: embeddings + callbacks forced LOCAL (--local flag)
+```
+
+## See Also
+
+- [Domain Management](/api/cli/domain-management) - Initialize and configure domains
+- [Data Management](/api/cli/data-management) - Check articles and reset status
+- [Configuration Reference](/guides/configuration) - Domain config options

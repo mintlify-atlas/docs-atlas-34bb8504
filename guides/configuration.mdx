@@ -1,0 +1,605 @@
+---
+title: Configuration Reference
+description: Complete reference for domain configuration settings in config.yaml
+---
+
+Each research domain has a `config.yaml` file that controls processing behavior, deduplication settings, performance tuning, and more. This page documents all available configuration options.
+
+## Configuration File Location
+
+```
+configs/your_domain/config.yaml
+```
+
+Example domains:
+- `configs/guantanamo/config.yaml`
+- `configs/soviet_afghan_war/config.yaml`
+- `configs/template/config.yaml.template`
+
+## Basic Configuration
+
+### Domain Identification
+
+```yaml
+domain: "guantanamo"
+description: "Guantánamo Bay detention and related issues"
+```
+
+<ParamField path="domain" type="string" required>
+  Domain identifier. Must match the directory name in `configs/`.
+</ParamField>
+
+<ParamField path="description" type="string" required>
+  Human-readable description of the research domain. Displayed in the web interface.
+</ParamField>
+
+### Data Sources
+
+```yaml
+data_sources:
+  default_path: "data/guantanamo/raw_sources/miami_herald_articles.parquet"
+```
+
+<ParamField path="data_sources.default_path" type="string" required>
+  Path to the Parquet file containing your source articles. Must include columns:
+  `title`, `content`, `url`, `published_date`, `source_type`.
+</ParamField>
+
+### Output Configuration
+
+```yaml
+output:
+  directory: "data/guantanamo/entities"
+```
+
+<ParamField path="output.directory" type="string" required>
+  Directory where extracted entity Parquet files will be saved. Files created:
+  - `people.parquet`
+  - `organizations.parquet`
+  - `locations.parquet`
+  - `events.parquet`
+</ParamField>
+
+## Deduplication Configuration
+
+### Similarity Thresholds
+
+```yaml
+dedup:
+  similarity_thresholds:
+    default: 0.75
+    people: 0.82
+    organizations: 0.78
+    locations: 0.80
+    events: 0.76
+```
+
+<ParamField path="dedup.similarity_thresholds.default" type="float" default="0.75">
+  Default similarity threshold for all entity types (0.0-1.0). Higher values are
+  more strict, requiring closer matches for deduplication.
+</ParamField>
+
+<ParamField path="dedup.similarity_thresholds.people" type="float" default="0.82">
+  Similarity threshold for people. Recommended: 0.80-0.85 for strict name matching.
+</ParamField>
+
+<ParamField path="dedup.similarity_thresholds.organizations" type="float" default="0.78">
+  Similarity threshold for organizations. Lower than people to account for
+  acronyms and name variants.
+</ParamField>
+
+<ParamField path="dedup.similarity_thresholds.locations" type="float" default="0.80">
+  Similarity threshold for locations.
+</ParamField>
+
+<ParamField path="dedup.similarity_thresholds.events" type="float" default="0.76">
+  Similarity threshold for events. Lower to account for date variations.
+</ParamField>
+
+<Note>
+  **Threshold Guidelines:**
+  - **0.90+**: Very strict, may create duplicates
+  - **0.80-0.85**: Recommended for people
+  - **0.75-0.80**: Recommended for organizations/locations
+  - **0.70-0.75**: Recommended for events
+  - **Below 0.70**: May merge unrelated entities
+</Note>
+
+### Lexical Blocking
+
+Lexical blocking uses fast fuzzy string matching (RapidFuzz) to filter candidates before expensive embedding similarity checks.
+
+```yaml
+dedup:
+  lexical_blocking:
+    enabled: true
+    threshold: 60        # RapidFuzz score cutoff (0-100)
+    max_candidates: 50   # Max entities to check with embeddings
+```
+
+<ParamField path="dedup.lexical_blocking.enabled" type="boolean" default="true">
+  Enable lexical blocking for faster deduplication. Highly recommended.
+</ParamField>
+
+<ParamField path="dedup.lexical_blocking.threshold" type="integer" default="60">
+  RapidFuzz similarity score cutoff (0-100). Only entities scoring above this
+  threshold proceed to embedding similarity checks.
+  
+  Recommended values:
+  - **70+**: Very strict, may miss variants
+  - **60-70**: Recommended for most cases
+  - **50-60**: Looser matching, more candidates
+</ParamField>
+
+<ParamField path="dedup.lexical_blocking.max_candidates" type="integer" default="50">
+  Maximum number of candidate entities to evaluate with embeddings. Limits
+  computational cost for large entity sets.
+</ParamField>
+
+### Name Variants
+
+Define equivalence groups for names that should always be treated as the same entity.
+
+```yaml
+dedup:
+  name_variants:
+    organizations:
+      equivalence_groups:
+        - ["Department of Defense", "Defense Department", "DoD", "Pentagon"]
+        - ["Central Intelligence Agency", "CIA"]
+        - ["Federal Bureau of Investigation", "FBI"]
+    locations:
+      equivalence_groups:
+        - ["Guantanamo Bay", "Guantanamo", "GTMO", "Guantanamo Bay Naval Base"]
+        - ["United States", "U.S.", "US"]
+```
+
+<ParamField path="dedup.name_variants.{entity_type}.equivalence_groups" type="array">
+  List of name variant groups. Each group is an array of strings that should be
+  treated as the same entity. The first name in each group is used as the
+  canonical name.
+  
+  Supported entity types:
+  - `organizations`
+  - `locations`
+  - `people` (use sparingly)
+</ParamField>
+
+<Warning>
+  Name variant equivalence is applied **before** similarity checking. Only include
+  variants you're certain refer to the same entity. False equivalences cannot be
+  corrected without reprocessing.
+</Warning>
+
+## Performance Configuration
+
+### Concurrency Settings
+
+```yaml
+performance:
+  concurrency:
+    extract_workers: 8        # Parallel articles in extraction phase
+    extract_per_article: 4    # Parallel entity types within article
+    llm_in_flight: 16         # Max concurrent cloud LLM calls
+    ollama_in_flight: 2       # Max concurrent Ollama calls (local mode)
+  queue:
+    max_buffered_articles: 32  # Backpressure limit for extraction -> merge
+```
+
+<ParamField path="performance.concurrency.extract_workers" type="integer" default="8">
+  Number of articles to process in parallel. More workers = faster processing
+  but higher memory usage and API costs.
+  
+  Recommended values:
+  - **4-8**: Good default for most systems
+  - **16+**: Powerful systems with high API rate limits
+  - **1-2**: Limited API rate limits or memory
+</ParamField>
+
+<ParamField path="performance.concurrency.extract_per_article" type="integer" default="4">
+  Number of entity types to extract in parallel per article. With 4 entity types
+  (people, organizations, locations, events), setting this to 4 extracts all
+  types simultaneously.
+</ParamField>
+
+<ParamField path="performance.concurrency.llm_in_flight" type="integer" default="16">
+  Maximum concurrent cloud LLM API calls across all workers. Use this to respect
+  API rate limits.
+  
+  Recommended values:
+  - **16**: Default for most cloud APIs
+  - **32+**: High rate limit plans
+  - **4-8**: Free tier or low rate limits
+</ParamField>
+
+<ParamField path="performance.concurrency.ollama_in_flight" type="integer" default="2">
+  Maximum concurrent Ollama calls when using local models (`--local` flag).
+  Limited by GPU memory and compute.
+</ParamField>
+
+<ParamField path="performance.queue.max_buffered_articles" type="integer" default="32">
+  Maximum articles buffered between extraction and merge phases. Provides
+  backpressure to prevent memory overflow.
+</ParamField>
+
+### Batching Configuration
+
+```yaml
+batching:
+  embed_batch_size: 64        # Texts per embedding API call
+  embed_drain_timeout_ms: 100 # Reserved for future async drain behavior
+```
+
+<ParamField path="batching.embed_batch_size" type="integer" default="64">
+  Number of texts to batch in a single embedding API call during merge phase.
+  Larger batches are more efficient but require more memory.
+  
+  Recommended values:
+  - **32**: Conservative, low memory
+  - **64**: Default, good balance
+  - **100+**: High-memory systems
+</ParamField>
+
+## Caching Configuration
+
+### Global Cache Settings
+
+```yaml
+cache:
+  enabled: true
+```
+
+<ParamField path="cache.enabled" type="boolean" default="true">
+  Master switch for all caching. Disable to force fresh processing (slower).
+</ParamField>
+
+### Embedding Cache
+
+```yaml
+cache:
+  embeddings:
+    lru_max_items: 4096         # In-memory LRU cache size
+```
+
+<ParamField path="cache.embeddings.lru_max_items" type="integer" default="4096">
+  Maximum number of embedding vectors to cache in memory (LRU). Larger cache
+  reduces API calls but increases memory usage.
+</ParamField>
+
+### Extraction Cache
+
+```yaml
+cache:
+  extraction:
+    enabled: true
+    subdir: "cache/extractions"  # Persistent sidecar under output dir
+    version: 1                   # Bump to invalidate all cached extractions
+```
+
+<ParamField path="cache.extraction.enabled" type="boolean" default="true">
+  Enable persistent extraction result caching. Cached extractions are reused
+  when article content, model, prompt, and schema are unchanged.
+</ParamField>
+
+<ParamField path="cache.extraction.subdir" type="string" default="cache/extractions">
+  Subdirectory under `output.directory` for extraction cache files.
+</ParamField>
+
+<ParamField path="cache.extraction.version" type="integer" default="1">
+  Cache version number. Increment to invalidate all cached extractions after
+  changing prompts, entity definitions, or model settings.
+</ParamField>
+
+<Note>
+  Extraction cache is keyed on:
+  - Article content hash (SHA-256)
+  - Model name
+  - Prompt text
+  - Schema structure
+  - Temperature setting
+  - Cache version
+  
+  Changing any of these invalidates the cache for that article.
+</Note>
+
+### Match Check Cache
+
+```yaml
+cache:
+  match_check:
+    enabled: true
+    max_items: 8192              # Per-run LRU cache size
+```
+
+<ParamField path="cache.match_check.enabled" type="boolean" default="true">
+  Enable caching of LLM match check results (used during entity deduplication).
+</ParamField>
+
+<ParamField path="cache.match_check.max_items" type="integer" default="8192">
+  Maximum number of match check results to cache per processing run (in-memory LRU).
+</ParamField>
+
+### Article Cache
+
+```yaml
+cache:
+  articles:
+    skip_if_unchanged: true      # Skip articles whose content hash hasn't changed
+```
+
+<ParamField path="cache.articles.skip_if_unchanged" type="boolean" default="true">
+  Skip processing articles whose content hash matches the last processing run.
+  Disable to reprocess all articles regardless of changes.
+</ParamField>
+
+## Processing Configuration
+
+```yaml
+processing:
+  relevance_check: true
+  batch_size: 5
+```
+
+<ParamField path="processing.relevance_check" type="boolean" default="true">
+  Enable relevance filtering before extraction. Articles determined not relevant
+  to your research domain are skipped. Uses `prompts/relevance.md` prompt.
+</ParamField>
+
+<ParamField path="processing.batch_size" type="integer" default="5">
+  Number of articles to process before writing intermediate results. Lower values
+  provide more frequent progress updates.
+</ParamField>
+
+## Embeddings Configuration
+
+```yaml
+embeddings:
+  mode: cloud  # Options: auto, local, cloud, hybrid
+  cloud:
+    model: jina_ai/jina-embeddings-v3
+    batch_size: 100
+    max_retries: 3
+    timeout: 30
+  local:
+    model: sentence-transformers/all-MiniLM-L6-v2
+    batch_size: 32
+    device: auto  # auto|cpu|cuda|mps
+```
+
+<ParamField path="embeddings.mode" type="string" default="cloud">
+  Embedding model selection strategy:
+  - `cloud`: Always use cloud API embeddings (Jina AI)
+  - `local`: Always use local embeddings (requires PyTorch)
+  - `auto`: Use cloud if available, fall back to local
+  - `hybrid`: Use both (advanced)
+</ParamField>
+
+### Cloud Embeddings
+
+<ParamField path="embeddings.cloud.model" type="string" default="jina_ai/jina-embeddings-v3">
+  Cloud embedding model identifier (LiteLLM format). Jina AI recommended for
+  quality and speed.
+</ParamField>
+
+<ParamField path="embeddings.cloud.batch_size" type="integer" default="100">
+  Maximum texts per embedding API call.
+</ParamField>
+
+<ParamField path="embeddings.cloud.max_retries" type="integer" default="3">
+  Number of retries for failed embedding API calls.
+</ParamField>
+
+<ParamField path="embeddings.cloud.timeout" type="integer" default="30">
+  API call timeout in seconds.
+</ParamField>
+
+### Local Embeddings
+
+<ParamField path="embeddings.local.model" type="string" default="sentence-transformers/all-MiniLM-L6-v2">
+  Local embedding model from Hugging Face sentence-transformers. Requires
+  `uv sync --extra local-embeddings`.
+</ParamField>
+
+<ParamField path="embeddings.local.batch_size" type="integer" default="32">
+  Batch size for local embedding generation. Limited by GPU memory.
+</ParamField>
+
+<ParamField path="embeddings.local.device" type="string" default="auto">
+  Device for local embeddings:
+  - `auto`: Automatically detect best device (CUDA > MPS > CPU)
+  - `cpu`: Force CPU (slow but compatible)
+  - `cuda`: Force CUDA GPU (requires NVIDIA GPU)
+  - `mps`: Force Apple Silicon GPU (requires M1/M2/M3 Mac)
+</ParamField>
+
+## Merge Evidence Configuration
+
+```yaml
+merge_evidence:
+  max_chars: 1500         # Truncate evidence text to this length
+  window_chars: 240       # Characters per context window around entity
+  max_windows: 3          # Max context windows to extract from article
+```
+
+<ParamField path="merge_evidence.max_chars" type="integer" default="1500">
+  Maximum total characters of evidence text to include when checking if two
+  entities should merge. Truncates long articles to save API costs.
+</ParamField>
+
+<ParamField path="merge_evidence.window_chars" type="integer" default="240">
+  Number of characters to include before and after each entity mention as
+  context evidence.
+</ParamField>
+
+<ParamField path="merge_evidence.max_windows" type="integer" default="3">
+  Maximum number of context windows to extract per article. Prevents extremely
+  long evidence for entities mentioned many times.
+</ParamField>
+
+## Legacy Settings
+
+```yaml
+similarity_threshold: 0.75
+```
+
+<ParamField path="similarity_threshold" type="float" default="0.75">
+  Legacy similarity threshold. Superseded by `dedup.similarity_thresholds.default`.
+  Kept for backward compatibility.
+</ParamField>
+
+## Complete Example
+
+Here's a complete `config.yaml` with all commonly used settings:
+
+```yaml
+# Domain identification
+domain: "guantanamo"
+description: "Guantánamo Bay detention and related issues"
+
+# Data sources
+data_sources:
+  default_path: "data/guantanamo/raw_sources/miami_herald_articles.parquet"
+
+# Output configuration  
+output:
+  directory: "data/guantanamo/entities"
+
+# Legacy threshold (superseded by dedup.similarity_thresholds)
+similarity_threshold: 0.75
+
+# Deduplication configuration
+dedup:
+  similarity_thresholds:
+    default: 0.75
+    people: 0.82
+    organizations: 0.78
+    locations: 0.80
+    events: 0.76
+  lexical_blocking:
+    enabled: true
+    threshold: 60
+    max_candidates: 50
+  name_variants:
+    organizations:
+      equivalence_groups:
+        - ["Department of Defense", "Defense Department", "DoD", "Pentagon"]
+        - ["Central Intelligence Agency", "CIA"]
+    locations:
+      equivalence_groups:
+        - ["Guantanamo Bay", "Guantanamo", "GTMO"]
+
+# Performance configuration
+performance:
+  concurrency:
+    extract_workers: 8
+    extract_per_article: 4
+    llm_in_flight: 16
+    ollama_in_flight: 2
+  queue:
+    max_buffered_articles: 32
+
+# Batching configuration
+batching:
+  embed_batch_size: 64
+  embed_drain_timeout_ms: 100
+
+# Caching configuration
+cache:
+  enabled: true
+  embeddings:
+    lru_max_items: 4096
+  extraction:
+    enabled: true
+    subdir: "cache/extractions"
+    version: 1
+  match_check:
+    enabled: true
+    max_items: 8192
+  articles:
+    skip_if_unchanged: true
+
+# Merge evidence configuration
+merge_evidence:
+  max_chars: 1500
+  window_chars: 240
+  max_windows: 3
+
+# Processing configuration
+processing:
+  relevance_check: true
+  batch_size: 5
+
+# Embeddings configuration
+embeddings:
+  mode: cloud
+  cloud:
+    model: jina_ai/jina-embeddings-v3
+    batch_size: 100
+    max_retries: 3
+    timeout: 30
+  local:
+    model: sentence-transformers/all-MiniLM-L6-v2
+    batch_size: 32
+    device: auto
+```
+
+## Configuration Tips
+
+### For Fast Processing
+
+```yaml
+performance:
+  concurrency:
+    extract_workers: 16
+    llm_in_flight: 32
+
+cache:
+  extraction:
+    enabled: true
+```
+
+### For Low API Costs
+
+```yaml
+performance:
+  concurrency:
+    extract_workers: 4
+    llm_in_flight: 8
+
+processing:
+  relevance_check: true  # Skip irrelevant articles
+
+embeddings:
+  mode: local  # Use local embeddings
+```
+
+### For High Accuracy
+
+```yaml
+dedup:
+  similarity_thresholds:
+    people: 0.85  # Stricter matching
+    organizations: 0.82
+  lexical_blocking:
+    threshold: 70  # More strict filtering
+
+processing:
+  relevance_check: true
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Creating Domains" href="/guides/creating-domains">
+    Learn how to set up entity types and prompts
+  </Card>
+  <Card title="Processing Articles" href="/guides/processing-articles">
+    Process your sources with optimized settings
+  </Card>
+  <Card title="Data Format" href="/guides/data-format">
+    Prepare input data in Parquet format
+  </Card>
+  <Card title="Web Interface" href="/guides/web-interface">
+    Browse extracted entities
+  </Card>
+</CardGroup>

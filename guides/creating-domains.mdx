@@ -1,0 +1,298 @@
+---
+title: Creating Research Domains
+description: Learn how to create and configure custom research domains for entity extraction
+---
+
+A **research domain** in Hinbox defines the scope of your historical research project. Each domain has its own entity types, extraction prompts, and processing settings tailored to a specific historical period, region, or research topic.
+
+## Quick Start
+
+Create a new research domain in three simple steps:
+
+<Steps>
+  <Step title="Initialize the domain">
+    Use the `just init` command to create a new domain from the template:
+    
+    ```bash
+    just init soviet_afghan_war
+    ```
+    
+    This creates a new directory at `configs/soviet_afghan_war/` with template configuration files.
+  </Step>
+
+  <Step title="Configure entity types">
+    Edit the YAML files in `configs/soviet_afghan_war/categories/` to define entity types relevant to your research:
+    
+    - `people.yaml` - Types of people (military_leaders, diplomats, commanders)
+    - `organizations.yaml` - Organization types (military_units, intelligence_agencies)
+    - `locations.yaml` - Location types (provinces, military_bases, refugee_camps)
+    - `events.yaml` - Event types (battles, negotiations, refugee_movements)
+  </Step>
+
+  <Step title="Customize extraction prompts">
+    Edit the markdown files in `configs/soviet_afghan_war/prompts/` to provide domain-specific extraction instructions:
+    
+    - `people.md` - How to identify and categorize people
+    - `organizations.md` - How to extract organizations
+    - `locations.md` - How to identify locations
+    - `events.md` - How to extract events
+    - `relevance.md` - How to determine if a source is relevant
+  </Step>
+</Steps>
+
+## Domain Structure
+
+Each domain contains the following structure:
+
+```
+configs/your_domain/
+├── config.yaml           # Main configuration
+├── categories/           # Entity type definitions
+│   ├── people.yaml
+│   ├── organizations.yaml
+│   ├── locations.yaml
+│   └── events.yaml
+└── prompts/              # Extraction instructions
+    ├── people.md
+    ├── organizations.md
+    ├── locations.md
+    ├── events.md
+    └── relevance.md
+```
+
+## Configuring Entity Types
+
+Entity types are defined in YAML files under `categories/`. Each file defines the types and tags available for that entity category.
+
+### Example: People Categories
+
+`configs/guantanamo/categories/people.yaml`:
+
+```yaml
+person_types:
+  detainee:
+    description: "A person who is or was detained at Guantánamo Bay"
+    examples: ["Mohamedou Ould Slahi", "David Hicks"]
+    
+  military:
+    description: "Military personnel including soldiers and officers"
+    examples: ["General Geoffrey Miller", "Admiral Harry Harris"]
+    
+  lawyer:
+    description: "Attorneys and legal representatives"
+    examples: ["Clive Stafford Smith", "Gitanjali Gutierrez"]
+    
+  journalist:
+    description: "Reporters and media professionals"
+    examples: ["Carol Rosenberg", "Andy Worthington"]
+
+person_tags:
+  civil_rights:
+    description: "People involved in civil rights advocacy"
+    examples: ["ACLU lawyers", "Human rights activists"]
+    
+  intelligence:
+    description: "Intelligence agency personnel and analysts"
+    examples: ["CIA agents", "Intelligence analysts"]
+    
+  medical:
+    description: "Medical professionals and healthcare workers"
+    examples: ["Doctors", "Psychiatrists", "Medical staff"]
+```
+
+<Note>
+  **Best practices for entity types:**
+  - Use lowercase, underscore-separated names (e.g., `military_leader`)
+  - Provide clear descriptions that distinguish similar types
+  - Include 2-3 realistic examples from your domain
+  - Focus on types that matter for your research questions
+</Note>
+
+### Template Structure
+
+All category files follow this structure:
+
+```yaml
+# Main entity types (required)
+{entity}_types:
+  type_name:
+    description: "Clear description"
+    examples: ["Example 1", "Example 2"]
+
+# Additional tags (optional, for people and events)
+{entity}_tags:
+  tag_name:
+    description: "Tag description"
+    examples: ["Example 1", "Example 2"]
+```
+
+## Customizing Extraction Prompts
+
+Prompts are markdown files that instruct the AI model how to extract entities from your sources. They should be specific to your research domain and source types.
+
+### Example: People Extraction Prompt
+
+`configs/guantanamo/prompts/people.md` (excerpt):
+
+```markdown
+# People Extraction Prompt
+
+You are an expert at extracting people from documents about Guantánamo Bay
+detention and related issues.
+
+When identifying people, categorize them using these types:
+- **detainee**: People detained at Guantánamo Bay
+- **military**: Military personnel and officers
+- **lawyer**: Attorneys and legal representatives
+- **journalist**: Reporters and media professionals
+
+## Instructions
+
+- Extract all people mentioned who are relevant to detention issues
+- Categorize based on their primary role in the documents
+- Assign relevant tags (civil_rights, intelligence, medical, etc.)
+- Use standard ASCII characters for names
+
+## Output Format
+
+Return each person as JSON with 'name', 'type', and 'tags':
+
+```json
+[
+  {"name": "Carol Rosenberg", "type": "journalist", "tags": []},
+  {"name": "Clive Stafford Smith", "type": "lawyer", "tags": ["civil_rights"]}
+]
+```
+```
+
+<Note>
+  Prompts are instructions for AI models, not templates. Write them in natural
+  language and be specific about what's important in your domain.
+</Note>
+
+## Main Configuration File
+
+The `config.yaml` file contains paths, processing settings, and deduplication configuration.
+
+### Basic Configuration
+
+`configs/soviet_afghan_war/config.yaml`:
+
+```yaml
+domain: "soviet_afghan_war"
+description: "Soviet-Afghan War (1979-1989) research"
+
+# Data source configuration
+data_sources:
+  default_path: "data/soviet_afghan_war/raw_sources/articles.parquet"
+
+# Output configuration  
+output:
+  directory: "data/soviet_afghan_war/entities"
+
+# Processing configuration
+processing:
+  relevance_check: true
+  batch_size: 5
+```
+
+### Advanced Configuration
+
+See the [Configuration Reference](/guides/configuration) for details on:
+- Deduplication thresholds per entity type
+- Name variant equivalence groups
+- Performance and concurrency settings
+- Caching configuration
+- Embedding model selection
+
+## Domain Examples
+
+### Guantánamo Bay Research
+
+**Focus**: Detention, legal proceedings, human rights
+
+**Key entity types**:
+- People: detainee, military, lawyer, journalist
+- Organizations: military, intelligence, legal, humanitarian
+- Locations: detention_facility, military_base
+- Events: detention, legal proceedings, policy changes
+
+### Historical Food Studies
+
+**Focus**: Food history, agricultural practices, culinary traditions
+
+**Key entity types**:
+- People: farmers, traders, cookbook_authors, anthropologists
+- Organizations: agricultural_cooperatives, food_companies, markets
+- Locations: farms, markets, kitchens, trade_routes
+- Events: harvests, famines, recipe_documentation, trade_agreements
+
+### Conflict Studies
+
+**Focus**: Military history, geopolitical events
+
+**Key entity types**:
+- People: military_leaders, diplomats, commanders, journalists
+- Organizations: military_units, intelligence_agencies, tribal_groups
+- Locations: provinces, military_bases, refugee_camps
+- Events: battles, negotiations, refugee_movements
+
+## Testing Your Configuration
+
+After creating your domain, test it with a small number of articles:
+
+```bash
+# Process just 2 articles to test extraction
+just process-domain soviet_afghan_war --limit 2
+
+# Use verbose mode to see extraction details
+just process-domain soviet_afghan_war --limit 2 --verbose
+```
+
+Check the output files in your configured directory:
+
+```
+data/soviet_afghan_war/entities/
+├── people.parquet
+├── organizations.parquet
+├── locations.parquet
+└── events.parquet
+```
+
+<Warning>
+  Always test with a small sample first. Iterate on your prompts and categories
+  based on the extraction results before processing your full dataset.
+</Warning>
+
+## Managing Multiple Domains
+
+List all available domains:
+
+```bash
+just domains
+```
+
+Each domain is independent with its own:
+- Entity type definitions
+- Extraction prompts
+- Processing settings
+- Output directory
+
+Switch between domains using the `--domain` flag or by using the web interface domain selector.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Process Articles" href="/guides/processing-articles">
+    Learn how to process your historical sources and extract entities
+  </Card>
+  <Card title="Configuration Reference" href="/guides/configuration">
+    Complete reference for config.yaml settings
+  </Card>
+  <Card title="Data Format" href="/guides/data-format">
+    Prepare your sources in the required Parquet format
+  </Card>
+  <Card title="Web Interface" href="/guides/web-interface">
+    Browse and explore extracted entities
+  </Card>
+</CardGroup>

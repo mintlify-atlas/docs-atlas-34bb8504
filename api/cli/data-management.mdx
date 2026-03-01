@@ -1,0 +1,406 @@
+---
+title: "Data Management Commands"
+description: "Check article statistics, reset processing status, and manage the frontend interface"
+---
+
+## Overview
+
+Data management commands help you inspect articles, reset processing state, and launch the web interface for browsing extracted entities.
+
+## Article Statistics
+
+### `just check`
+
+Check article database statistics and processing status.
+
+```bash
+just check [--sample]
+```
+
+**Alias:** `just stats`
+
+**Source:** `scripts/check_articles_parquet.py`
+
+<ParamField path="--sample" type="flag">
+  Display details of a sample article from the dataset, including content preview and processing metadata.
+  
+  **Default:** `false`
+</ParamField>
+
+## Usage Examples
+
+<CodeGroup>
+```bash Basic statistics
+just check
+```
+
+```bash With sample article
+just check --sample
+```
+
+```bash Using alias
+just stats
+```
+</CodeGroup>
+
+## Output Format
+
+### Basic Statistics
+
+```bash
+$ just check
+
+Checking articles in parquet file
+
+Total articles in parquet file: 1,247
+
+┏━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━┓
+┃ Metric              ┃ Count  ┃ Percentage ┃
+┡━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━┩
+│ Total Articles      │ 1,247  │ 100%       │
+│ Processed           │ 342    │ 27.4%      │
+│ Unprocessed         │ 905    │ 72.6%      │
+│ Relevance Checked   │ 425    │ 34.1%      │
+└─────────────────────┴────────┴────────────┘
+
+Date Range:
+  Oldest: First Reports Surface of Detention Facility Opening (2002-01-15)
+  Newest: Supreme Court Hears Guantanamo Bay Case Arguments (2024-03-12)
+
+Check completed
+```
+
+### Statistics Breakdown
+
+| Metric | Description |
+|--------|-------------|
+| **Total Articles** | All articles in the Parquet file |
+| **Processed** | Articles that have completed entity extraction |
+| **Unprocessed** | Articles awaiting processing |
+| **Relevance Checked** | Articles that have been evaluated for domain relevance |
+
+### Sample Article Output
+
+```bash
+$ just check --sample
+
+# ... statistics table ...
+
+Sample Article:
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Field            ┃ Value                                              ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Title            │ Pentagon Releases Names of Guantanamo Detainees    │
+│ URL              │ https://www.miamiherald.com/news/article123...     │
+│ Published        │ 2006-04-20                                         │
+│ Author           │ Carol Rosenberg                                    │
+│ Content Preview  │ The Pentagon on Thursday released the names of...  │
+│ Processed        │ True                                               │
+│ Processing Date  │ 2024-03-15T14:23:45                               │
+└──────────────────┴────────────────────────────────────────────────────┘
+```
+
+## Processing Status Reset
+
+### `just reset`
+
+Reset processing status of all articles, allowing them to be reprocessed.
+
+```bash
+just reset
+```
+
+**Source:** `scripts/reset_processing_status.py`
+
+<Warning>
+  This command modifies the articles Parquet file in-place. It does NOT delete extracted entities, only clears the "processed" flag on articles.
+</Warning>
+
+### Interactive Confirmation
+
+The command prompts for confirmation before resetting:
+
+```bash
+$ just reset
+
+This will reset ALL articles. Are you sure? (y/N): y
+Reset processing status for 1,247 articles
+```
+
+**To cancel:**
+```bash
+$ just reset
+
+This will reset ALL articles. Are you sure? (y/N): n
+Reset cancelled.
+```
+
+### Use Cases
+
+<Accordion title="After configuration changes">
+  When you've modified extraction prompts or entity schemas and want to reprocess all articles with the new configuration.
+</Accordion>
+
+<Accordion title="After LLM improvements">
+  When you've upgraded your LLM model or improved extraction logic and want to regenerate all entities.
+</Accordion>
+
+<Accordion title="Testing and development">
+  During development when you need to test the full pipeline repeatedly.
+</Accordion>
+
+<Accordion title="Partial processing errors">
+  If a previous processing run was interrupted and you want to start fresh.
+</Accordion>
+
+<Note>
+  The reset command only affects article metadata. Your extracted entities in `data/<domain>/output/*.parquet` are not deleted. To start completely fresh, manually delete the entity Parquet files as well.
+</Note>
+
+## Web Interface
+
+### `just frontend`
+
+Start the web interface for browsing extracted entities.
+
+```bash
+just frontend
+```
+
+**Aliases:** `just web`, `just ui`
+
+**Source:** `src/frontend/`
+
+**Port:** `5001`
+
+### Accessing the Interface
+
+After starting the server:
+
+```bash
+$ just frontend
+
+Open http://localhost:5001 in your browser
+ * Serving FastHTML app
+ * Running on http://localhost:5001
+```
+
+<Card title="Open Web Interface" icon="browser" href="http://localhost:5001">
+  Click to open the Hinbox web interface (when running locally)
+</Card>
+
+## Web Interface Features
+
+### Home Page
+
+- **Entity counts** by type (people, events, locations, organizations)
+- **Recent entities** grid with confidence indicators
+- **Domain switcher** to view different projects
+
+### Entity Browse Pages
+
+<Tabs>
+  <Tab title="People">
+    Browse all extracted people with:
+    - Name and aliases
+    - Roles and affiliations
+    - Tag filters (military, political, legal, etc.)
+    - Confidence scores
+    - Related article counts
+  </Tab>
+  
+  <Tab title="Events">
+    Browse all extracted events with:
+    - Event titles and dates
+    - Event type filters
+    - Timeline visualization
+    - Related entities
+    - Source article links
+  </Tab>
+  
+  <Tab title="Locations">
+    Browse all extracted locations with:
+    - Location names and types
+    - Geographic hierarchy
+    - Related events and people
+    - Mention frequency
+  </Tab>
+  
+  <Tab title="Organizations">
+    Browse all extracted organizations with:
+    - Organization names
+    - Organization types
+    - Related people and events
+    - Confidence indicators
+  </Tab>
+</Tabs>
+
+### Entity Detail Pages
+
+Each entity has a detail page showing:
+
+- **Profile text:** AI-generated summary from source articles
+- **Profile versions:** Historical versions with timestamps
+- **Confidence score:** Extraction quality indicator
+- **Aliases:** Alternative names found in sources
+- **Tags:** Categorization labels
+- **Related articles:** Source articles with citations
+- **Grounding report:** Citation verification scores
+
+### Design System
+
+The interface uses the "Archival Elegance" design system:
+
+- **Fonts:** Crimson Pro (headings), IBM Plex Sans (body)
+- **Colors:** Warm teal-slate primary, amber accents
+- **Layout:** Sidebar filters + main content area
+- **Style:** Minimalist, research-focused aesthetic
+
+<Note>
+  The frontend is built with FastHTML for fast, server-rendered HTML with minimal JavaScript.
+</Note>
+
+## Data Inspection Workflow
+
+<Steps>
+  <Step title="Check Article Status">
+    Run `just check` to see how many articles are processed vs. unprocessed.
+  </Step>
+  
+  <Step title="Inspect Sample">
+    Run `just check --sample` to see an example article and verify data quality.
+  </Step>
+  
+  <Step title="Process Articles">
+    Run `just process --limit N` to extract entities from N articles.
+  </Step>
+  
+  <Step title="Launch Web Interface">
+    Run `just frontend` to browse extracted entities in your browser.
+  </Step>
+  
+  <Step title="Review Results">
+    Use the web interface to review entity quality, profiles, and citations.
+  </Step>
+  
+  <Step title="Iterate if Needed">
+    If quality is low, adjust prompts/config, run `just reset`, and reprocess.
+  </Step>
+</Steps>
+
+## File Locations
+
+Data management commands operate on these files:
+
+| File | Purpose | Modified By |
+|------|---------|-------------|
+| `data/<domain>/raw_sources/articles.parquet` | Source articles | `just reset` |
+| `data/<domain>/output/processing_status.json` | Processing sidecar | `just process` |
+| `data/<domain>/output/*.parquet` | Extracted entities | `just process` |
+
+<Warning>
+  Always backup your data before running `just reset`, especially if you have manual corrections to your articles.
+</Warning>
+
+## Additional Data Commands
+
+### Miami Herald Specific (Legacy)
+
+These commands are specific to the Guantanamo Bay / Miami Herald dataset:
+
+<Accordion title="just fetch-miami">
+  Fetch Miami Herald articles from the source API.
+  
+  **Source:** `scripts/get_miami_herald_articles.py`
+  
+  ```bash
+  just fetch-miami
+  ```
+  
+  <Note>
+    This is a legacy command for the original Guantanamo domain. For custom domains, you'll provide your own article sources.
+  </Note>
+</Accordion>
+
+<Accordion title="just import-miami">
+  Import Miami Herald articles from JSONL format to Parquet.
+  
+  **Source:** `scripts/import_miami_herald_articles.py`
+  
+  ```bash
+  just import-miami
+  ```
+  
+  Converts JSONL article exports into the Parquet format used by the pipeline.
+</Accordion>
+
+## Monitoring Processing Progress
+
+Combine commands to monitor progress:
+
+```bash
+# Initial state
+just check
+
+# Process 50 articles
+just process --limit 50
+
+# Check progress
+just check
+
+# Continue processing
+just process --limit 50
+
+# View results in browser
+just frontend
+```
+
+## Command Reference Summary
+
+| Command | Purpose | Interactive |
+|---------|---------|-------------|
+| `just check` | Show article statistics | No |
+| `just check --sample` | Show stats + sample article | No |
+| `just stats` | Alias for `just check` | No |
+| `just reset` | Reset processing status | Yes (confirms) |
+| `just frontend` | Start web interface | Yes (server) |
+| `just web` | Alias for `just frontend` | Yes (server) |
+| `just ui` | Alias for `just frontend` | Yes (server) |
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Articles file not found">
+    **Error:** `ERROR: Articles file not found at data/.../articles.parquet`
+    
+    **Solution:** Ensure your articles Parquet file exists at the path specified in your domain config, or provide a custom path with `--articles-path`.
+  </Accordion>
+  
+  <Accordion title="Frontend port already in use">
+    **Error:** `OSError: [Errno 48] Address already in use`
+    
+    **Solution:** Another process is using port 5001. Either:
+    - Stop the other process
+    - Kill the existing frontend: `pkill -f "python -m src.frontend"`
+    - Change the port in `src/frontend/app_config.py`
+  </Accordion>
+  
+  <Accordion title="No entities showing in frontend">
+    **Cause:** No articles have been processed yet, or entity Parquet files are missing.
+    
+    **Solution:**
+    1. Run `just check` to verify processing status
+    2. Run `just process --limit 10` to process some articles
+    3. Refresh the frontend browser page
+  </Accordion>
+  
+  <Accordion title="Reset cancelled by accident">
+    **Solution:** Simply run `just reset` again and enter `y` when prompted.
+  </Accordion>
+</AccordionGroup>
+
+## See Also
+
+- [Process & Extraction](/api/cli/process) - Process articles and extract entities
+- [Domain Management](/api/cli/domain-management) - Create and configure domains
+- [Frontend Configuration](/guides/web-interface) - Customize the web interface

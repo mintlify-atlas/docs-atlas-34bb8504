@@ -1,0 +1,496 @@
+---
+title: "Entity Types & Structure"
+description: "Understanding the four core entity types in Hinbox: people, organizations, locations, and events"
+---
+
+Hinbox extracts and manages four core entity types, each with its own schema, keying strategy, and merge behavior. Entity definitions are **domain-specific** and configured in `configs/<domain>/categories/`.
+
+## The Four Entity Types
+
+<CardGroup cols={2}>
+  <Card title="People" icon="user">
+    Individuals mentioned in source documents (detainees, officials, lawyers, journalists, etc.)
+  </Card>
+  
+  <Card title="Organizations" icon="building">
+    Institutions and groups (military units, NGOs, government agencies, media outlets)
+  </Card>
+  
+  <Card title="Locations" icon="location-dot">
+    Geographic places and facilities (detention centers, military bases, cities, countries)
+  </Card>
+  
+  <Card title="Events" icon="calendar">
+    Temporal occurrences (legal proceedings, protests, transfers, policy changes)
+  </Card>
+</CardGroup>
+
+## Entity Keys & Deduplication
+
+Each entity type uses a different **key strategy** for deduplication:
+
+| Entity Type | Key Fields | Key Type | Example |
+|-------------|-----------|----------|----------|
+| **People** | `name` | `str` | `"Carol Rosenberg"` |
+| **Organizations** | `name`, `type` | `tuple` | `("ACLU", "legal")` |
+| **Locations** | `name`, `type` | `tuple` | `("Guantanamo Bay", "detention_facility")` |
+| **Events** | `title`, `start_date` | `tuple` | `("Rasul v. Bush", "2004-06-28")` |
+
+**Location**: `src/engine/mergers.py:114`
+
+<Note>
+Tuple keys enable the same base name to represent different entities when types differ. For example:
+- `("Washington", "city")` vs. `("Washington", "state")`
+- `("Red Cross", "humanitarian")` vs. `("Red Cross Hospital", "location")`
+</Note>
+
+## Entity Schema Structure
+
+All entities share a common base structure with type-specific extensions:
+
+### Common Fields (All Types)
+
+<ResponseField name="name" type="string" required>
+  Primary identifier for people, organizations, and locations
+</ResponseField>
+
+<ResponseField name="type" type="string" required>
+  Entity type from domain-specific category definitions
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Brief description of the entity extracted from source text
+</ResponseField>
+
+<ResponseField name="alternative_names" type="array">
+  List of alternative names, aliases, or abbreviations (e.g., `["DoD", "Pentagon"]` for Department of Defense)
+</ResponseField>
+
+<ResponseField name="profile" type="object">
+  Versioned narrative profile with sources and confidence
+  
+  <Expandable title="Profile structure">
+    ```json
+    {
+      "text": "Comprehensive narrative about the entity with [article_id] citations...",
+      "tags": ["civil_rights", "legal"],
+      "confidence": 0.92,
+      "sources": ["mh_2024_01_15_001", "mh_2024_01_16_042"]
+    }
+    ```
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="articles" type="array">
+  List of article IDs mentioning this entity
+</ResponseField>
+
+<ResponseField name="article_count" type="integer">
+  Total number of articles mentioning this entity
+</ResponseField>
+
+<ResponseField name="first_seen" type="string">
+  ISO 8601 timestamp of first extraction
+</ResponseField>
+
+<ResponseField name="last_updated" type="string">
+  ISO 8601 timestamp of most recent update
+</ResponseField>
+
+### Embedding Fields (Search & Profiles)
+
+<ResponseField name="search_embedding" type="array">
+  Evidence-derived embedding vector for similarity search (preferred for merge decisions)
+</ResponseField>
+
+<ResponseField name="search_embedding_model" type="string">
+  Model used for search embedding (e.g., `"jina_ai/jina-embeddings-v3"`)
+</ResponseField>
+
+<ResponseField name="search_embedding_fingerprint" type="string">
+  Hash fingerprint of embedding model + parameters for compatibility checks
+</ResponseField>
+
+<ResponseField name="profile_embedding" type="array">
+  LLM-narrative-derived embedding (fallback for older entities)
+</ResponseField>
+
+<Info>
+Hinbox prefers `search_embedding` over `profile_embedding` for merge decisions because evidence text provides apples-to-apples comparison between new and existing entities. See [Evidence-First Similarity](/concepts/pipeline#evidence-first-similarity) for details.
+</Info>
+
+## Type-Specific Fields
+
+### People
+
+<ResponseField name="person_tags" type="array">
+  Domain-specific tags (e.g., `["civil_rights", "lawyer"]` in Guantanamo domain)
+</ResponseField>
+
+<ResponseField name="roles" type="array">
+  Historical roles extracted from articles (e.g., `["Defense Attorney", "ACLU Lawyer"]`)
+</ResponseField>
+
+<Tabs>
+  <Tab title="Example: Person Entity">
+    ```json
+    {
+      "name": "Clive Stafford Smith",
+      "type": "lawyer",
+      "person_tags": ["civil_rights", "defense"],
+      "description": "British-American attorney representing Guantanamo detainees",
+      "alternative_names": ["Stafford Smith"],
+      "roles": ["Defense Attorney", "Reprieve Founder"],
+      "articles": ["mh_2008_03_12_015", "mh_2010_07_22_031"],
+      "article_count": 47,
+      "profile": {
+        "text": "Clive Stafford Smith is a British-American attorney...",
+        "confidence": 0.95,
+        "sources": ["mh_2008_03_12_015", "mh_2010_07_22_031"]
+      }
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Category Definition (people.yaml)">
+    ```yaml
+    person_types:
+      lawyer:
+        description: "Attorneys, legal representatives, and other legal professionals"
+        examples: ["Clive Stafford Smith", "Gitanjali Gutierrez", "David Remes"]
+      
+      detainee:
+        description: "A person who is or was detained at Guantánamo Bay"
+        examples: ["Mohamedou Ould Slahi", "David Hicks"]
+    
+    person_tags:
+      civil_rights:
+        description: "People involved in civil rights advocacy or organizations"
+        examples: ["ACLU lawyers", "Human rights activists"]
+      
+      defense:
+        description: "People involved in defense or military defense roles"
+        examples: ["Defense attorneys", "Military defense counsel"]
+    ```
+  </Tab>
+</Tabs>
+
+### Organizations
+
+<ResponseField name="acronym" type="string">
+  Common acronym (e.g., `"ACLU"`, `"DoD"`, `"JTF-GTMO"`)
+</ResponseField>
+
+<ResponseField name="parent_organization" type="string">
+  Name of parent organization if applicable
+</ResponseField>
+
+<Tabs>
+  <Tab title="Example: Organization Entity">
+    ```json
+    {
+      "name": "American Civil Liberties Union",
+      "type": "legal",
+      "acronym": "ACLU",
+      "description": "Civil rights advocacy organization",
+      "alternative_names": ["ACLU"],
+      "articles": ["mh_2007_05_10_008", "mh_2011_09_14_022"],
+      "article_count": 128,
+      "profile": {
+        "text": "The American Civil Liberties Union (ACLU) is a nonprofit...",
+        "confidence": 0.98,
+        "sources": ["mh_2007_05_10_008", "mh_2011_09_14_022"]
+      }
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Category Definition (organizations.yaml)">
+    ```yaml
+    organization_types:
+      legal:
+        description: "Legal organizations and law firms"
+        examples: ["ACLU", "Center for Constitutional Rights", "Reprieve"]
+      
+      military:
+        description: "Military organizations"
+        examples: ["Joint Task Force Guantanamo", "US Army", "US Navy"]
+      
+      humanitarian:
+        description: "Organizations focused on humanitarian aid and human rights"
+        examples: ["International Red Cross", "Physicians for Human Rights"]
+    ```
+  </Tab>
+</Tabs>
+
+### Locations
+
+<ResponseField name="coordinates" type="object">
+  Geographic coordinates if available
+  
+  <Expandable title="Coordinates structure">
+    ```json
+    {
+      "latitude": 19.9073,
+      "longitude": -75.0918
+    }
+    ```
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="country" type="string">
+  Country name for location disambiguation
+</ResponseField>
+
+<Tabs>
+  <Tab title="Example: Location Entity">
+    ```json
+    {
+      "name": "Guantanamo Bay",
+      "type": "detention_facility",
+      "description": "U.S. Naval base and detention facility in Cuba",
+      "alternative_names": ["GTMO", "Naval Station Guantanamo Bay"],
+      "country": "Cuba",
+      "coordinates": {
+        "latitude": 19.9073,
+        "longitude": -75.0918
+      },
+      "articles": ["mh_2002_01_11_001", "mh_2023_12_15_891"],
+      "article_count": 1247
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Category Definition (locations.yaml)">
+    ```yaml
+    location_types:
+      detention_facility:
+        description: "Detention centers and prisons"
+        examples: ["Guantanamo Bay", "Camp Delta", "Camp X-Ray"]
+      
+      military_base:
+        description: "Military installations and bases"
+        examples: ["Naval Station Guantanamo Bay", "Bagram Air Base"]
+      
+      city:
+        description: "Cities and municipalities"
+        examples: ["Washington D.C.", "Miami", "Havana"]
+    ```
+  </Tab>
+</Tabs>
+
+### Events
+
+<ResponseField name="title" type="string" required>
+  Event title (part of composite key with `start_date`)
+</ResponseField>
+
+<ResponseField name="start_date" type="string" required>
+  ISO 8601 date when event started (part of composite key)
+</ResponseField>
+
+<ResponseField name="end_date" type="string">
+  ISO 8601 date when event ended (for ongoing events, may be null)
+</ResponseField>
+
+<ResponseField name="event_tags" type="array">
+  Domain-specific tags (e.g., `["legal_challenge", "habeas_corpus"]`)
+</ResponseField>
+
+<ResponseField name="participants" type="array">
+  Names of people or organizations involved in the event
+</ResponseField>
+
+<Tabs>
+  <Tab title="Example: Event Entity">
+    ```json
+    {
+      "title": "Rasul v. Bush",
+      "type": "legal",
+      "event_tags": ["legal_challenge", "habeas_corpus"],
+      "start_date": "2004-06-28",
+      "end_date": "2004-06-28",
+      "description": "Supreme Court ruling on Guantanamo detainee rights",
+      "alternative_titles": ["Rasul v. Bush Supreme Court Decision"],
+      "participants": ["Shafiq Rasul", "George W. Bush"],
+      "articles": ["mh_2004_06_28_042", "mh_2004_06_29_051"],
+      "article_count": 23
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Category Definition (events.yaml)">
+    ```yaml
+    event_types:
+      legal:
+        description: "Court cases, hearings, tribunals, legal proceedings"
+        examples: ["Habeas Corpus Hearing", "Military Commission Trial"]
+      
+      detention:
+        description: "Events related to capture, transfer, or detention"
+        examples: ["Detainee Transfer", "Capture Operation"]
+      
+      policy_change:
+        description: "Changes in government or military policy"
+        examples: ["Executive Order", "Policy Directive"]
+    
+    event_tags:
+      legal_challenge:
+        description: "Legal challenges to detention"
+      
+      habeas_corpus:
+        description: "Habeas corpus proceedings"
+      
+      torture:
+        description: "Torture allegations or incidents"
+    ```
+  </Tab>
+</Tabs>
+
+## Dynamic Pydantic Models
+
+Entity schemas are **dynamically generated** from domain configurations at runtime using `src/dynamic_models.py`. This allows each research domain to define custom types and tags.
+
+**Location**: `src/dynamic_models.py`
+
+<CodeGroup>
+```python Dynamic Model Generation (Conceptual)
+from pydantic import BaseModel, Field
+from src.config_loader import DomainConfig
+
+def create_person_model(domain: str) -> type[BaseModel]:
+    """Dynamically create Person model from domain config."""
+    config = DomainConfig(domain)
+    person_types = config.load_categories("people")
+    
+    # Extract valid person_types and person_tags from YAML
+    valid_types = list(person_types["person_types"].keys())
+    valid_tags = list(person_types.get("person_tags", {}).keys())
+    
+    class Person(BaseModel):
+        name: str = Field(..., description="Full name of the person")
+        type: str = Field(..., description=f"One of: {', '.join(valid_types)}")
+        person_tags: List[str] = Field(default_factory=list)
+        description: str = Field(default="")
+        # ... other fields
+    
+    return Person
+```
+</CodeGroup>
+
+<Info>
+This design enables **zero-code domain creation**: researchers can define new entity types and tags purely through YAML configuration files.
+</Info>
+
+## Entity Storage (Parquet)
+
+Entities are stored as **one Parquet file per type** in the domain output directory:
+
+```
+data/<domain>/entities/
+├── people.parquet
+├── organizations.parquet
+├── locations.parquet
+└── events.parquet
+```
+
+Parquet provides:
+- **Fast columnar reads** for analytics and filtering
+- **Schema validation** ensuring data consistency
+- **Compression** reducing disk usage by 10-50x vs. JSON
+- **Append-only writes** for incremental processing
+
+**Location**: `src/utils/file_ops.py:write_entities_table`
+
+## Entity Lifecycle
+
+<Steps>
+  <Step title="Extraction">
+    LLM extracts entity from article text using domain-specific prompt
+  </Step>
+  
+  <Step title="Quality Control">
+    Validates required fields, deduplicates within article, flags low-quality names
+  </Step>
+  
+  <Step title="Merge Check">
+    Evidence-first cascade determines if entity matches existing record
+  </Step>
+  
+  <Step title="Profile Generation">
+    Creates or updates versioned narrative profile with citations
+  </Step>
+  
+  <Step title="Profile Grounding">
+    Batch verification ensures profile claims are supported by source articles
+  </Step>
+  
+  <Step title="Parquet Write">
+    Atomic write of all entities to respective Parquet files
+  </Step>
+</Steps>
+
+## Name Handling & Canonicalization
+
+Hinbox includes sophisticated name handling to deal with variants and aliases:
+
+### Equivalence Groups
+
+Define known aliases in domain config:
+
+```yaml
+dedup:
+  name_variants:
+    organizations:
+      equivalence_groups:
+        - ["Department of Defense", "Defense Department", "DoD", "Pentagon"]
+        - ["Joint Task Force Guantanamo", "JTF-GTMO", "JTF GTMO"]
+```
+
+**Location**: `configs/<domain>/config.yaml`, `src/utils/name_variants.py`
+
+### Acronym Detection
+
+Automatically detects when a name is an acronym form:
+
+<CodeGroup>
+```python Acronym Detection
+from src.utils.name_variants import is_acronym_form, compute_acronym
+
+is_acronym_form("ACLU", "American Civil Liberties Union")  # True
+is_acronym_form("DoD", "Department of Defense")  # True
+
+compute_acronym("Department of Defense")  # "DoD"
+compute_acronym("Joint Task Force Guantanamo")  # "JTF-G"
+```
+</CodeGroup>
+
+### Canonical Name Scoring
+
+When multiple name variants exist, the best canonical name is selected based on:
+
+1. **Specificity**: Longer, more complete names
+2. **Frequency**: Number of article mentions
+3. **Acronym avoidance**: Prefer full names over acronyms for primary identifier
+
+**Location**: `src/utils/name_variants.py:score_canonical_name`
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Domain Configuration" icon="gear" href="/concepts/domains">
+    Define custom entity types, tags, and prompts for your research domain
+  </Card>
+  
+  <Card title="Processing Pipeline" icon="diagram-project" href="/concepts/pipeline">
+    Learn how entities flow through the 5-stage pipeline
+  </Card>
+  
+  <Card title="System Architecture" icon="sitemap" href="/concepts/architecture">
+    Understand the producer-consumer model and merge cascade
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api-reference/introduction">
+    Programmatic access to entity data and pipeline stages
+  </Card>
+</CardGroup>

@@ -1,0 +1,510 @@
+---
+title: Profile Generation & Versioning
+description: LLM-powered profile creation, updates, and version history tracking
+---
+
+## Overview
+
+The profiles module provides functions for generating narrative profiles of entities using LLM reflection, updating profiles with new article evidence, and tracking profile version history.
+
+---
+
+## Core Data Models
+
+### EntityProfile
+
+Structured profile model returned by LLM generation:
+
+```python
+class EntityProfile(BaseModel):
+    text: str  # Comprehensive narrative profile
+    tags: List[str] = []  # Relevant keywords/tags
+    confidence: float  # 0-1 confidence score
+    sources: List[str] = []  # Article IDs used as evidence
+```
+
+---
+
+### VersionedProfile
+
+Container for profile version history:
+
+```python
+class VersionedProfile(BaseModel):
+    current_version: int = 1
+    versions: List[ProfileVersion] = []
+    
+    def add_version(
+        self, 
+        profile_data: Dict, 
+        trigger_article_id: Optional[str] = None
+    ) -> ProfileVersion
+    
+    def get_version(self, version_number: int) -> Optional[ProfileVersion]
+    
+    def get_latest(self) -> Optional[ProfileVersion]
+```
+
+<ParamField path="current_version" type="int" default="1">
+  The current active version number
+</ParamField>
+
+<ParamField path="versions" type="List[ProfileVersion]" default="[]">
+  List of historical profile snapshots
+</ParamField>
+
+#### Methods
+
+**`add_version()`** - Append a new version to history
+
+```python
+new_version = versioned_profile.add_version(
+    profile_data={"text": "...", "tags": [...], ...},
+    trigger_article_id="doc123"
+)
+```
+
+**`get_version()`** - Retrieve a specific version by number
+
+**`get_latest()`** - Get the most recent version
+
+---
+
+### ProfileVersion
+
+A single snapshot in the version history:
+
+```python
+class ProfileVersion(BaseModel):
+    version_number: int
+    profile_data: Dict  # Complete profile snapshot (deep copied)
+    created_at: datetime
+    trigger_article_id: Optional[str] = None
+```
+
+<ParamField path="version_number" type="int" required>
+  Sequential version number (1, 2, 3, ...)
+</ParamField>
+
+<ParamField path="profile_data" type="Dict" required>
+  Deep copy of the complete profile at this version (prevents mutation)
+</ParamField>
+
+<ParamField path="created_at" type="datetime" required>
+  Timestamp when this version was created (auto-set to `datetime.now(UTC)`)
+</ParamField>
+
+<ParamField path="trigger_article_id" type="Optional[str]" default="None">
+  Article ID that triggered this profile update
+</ParamField>
+
+---
+
+## Profile Creation
+
+### create_profile()
+
+Create an initial profile for an entity using LLM reflection and iterative improvement.
+
+```python
+from src.engine.profiles import create_profile
+
+profile_dict, versioned_profile, improvement_history = create_profile(
+    entity_type: str,
+    entity_name: str,
+    article_text: str,
+    article_id: str,
+    model_type: str = "gemini",
+    domain: str = "guantanamo"
+) -> Tuple[Dict, VersionedProfile, list]
+```
+
+<ParamField path="entity_type" type="str" required>
+  Entity type singular form: `"person"`, `"organization"`, `"location"`, `"event"`
+</ParamField>
+
+<ParamField path="entity_name" type="str" required>
+  Canonical name of the entity
+</ParamField>
+
+<ParamField path="article_text" type="str" required>
+  Full article text to use as evidence
+</ParamField>
+
+<ParamField path="article_id" type="str" required>
+  Unique article identifier (stored in `sources`)
+</ParamField>
+
+<ParamField path="model_type" type="str" default="gemini">
+  Either `"gemini"` (cloud) or `"ollama"` (local)
+</ParamField>
+
+<ParamField path="domain" type="str" default="guantanamo">
+  Domain configuration (determines prompts and schemas)
+</ParamField>
+
+<ResponseField name="return" type="Tuple[Dict, VersionedProfile, list]">
+  Returns a 3-tuple:
+  
+  1. **`profile_dict`** - Profile dictionary with `text`, `tags`, `confidence`, `sources`
+  2. **`versioned_profile`** - VersionedProfile container (with initial version if versioning enabled)
+  3. **`improvement_history`** - List of reflection iterations with pass/fail results
+</ResponseField>
+
+#### Example
+
+```python
+profile, versioned, history = create_profile(
+    entity_type="person",
+    entity_name="Geoffrey Miller",
+    article_text=article_content,
+    article_id="doc123",
+    model_type="gemini",
+    domain="guantanamo"
+)
+
+print(profile["text"])
+# "Geoffrey Miller is a retired United States Army major general who..."
+
+print(f"Confidence: {profile['confidence']:.2f}")
+print(f"Tags: {profile['tags']}")
+print(f"Reflection iterations: {len(history)}")
+```
+
+<Note>
+  Profile creation uses iterative LLM reflection (max 3 iterations by default). Each iteration validates and improves the previous attempt. The `improvement_history` contains the reflection reasoning for each pass.
+</Note>
+
+---
+
+### create_profile_with_outcome()
+
+Safe version that never raises exceptions - returns `PhaseOutcome` with fallback on error.
+
+```python
+from src.engine.profiles import create_profile_with_outcome
+
+profile_dict, versioned_profile, history, outcome = create_profile_with_outcome(
+    entity_type: str,
+    entity_name: str,
+    article_text: str,
+    article_id: str,
+    model_type: str = "gemini",
+    domain: str = "guantanamo"
+) -> Tuple[Dict, VersionedProfile, list, PhaseOutcome]
+```
+
+Parameters are identical to `create_profile()`, but returns a 4-tuple with a `PhaseOutcome` object that includes:
+
+- Success/failure status
+- QC report (text length, citation count, tag count)
+- QC fixes applied
+- Error details (if failed)
+
+On failure, returns a minimal fallback profile with `outcome.fallback` populated.
+
+---
+
+## Profile Updates
+
+### update_profile()
+
+Update an existing profile with new article evidence using LLM merging.
+
+```python
+from src.engine.profiles import update_profile
+
+updated_profile, versioned_profile, history = update_profile(
+    entity_type: str,
+    entity_name: str,
+    existing_profile: Dict,
+    versioned_profile: VersionedProfile,
+    new_article_text: str,
+    new_article_id: str,
+    model_type: str = "gemini",
+    domain: str = "guantanamo"
+) -> Tuple[Dict, VersionedProfile, list]
+```
+
+<ParamField path="entity_type" type="str" required>
+  Entity type singular form
+</ParamField>
+
+<ParamField path="entity_name" type="str" required>
+  Canonical name of the entity
+</ParamField>
+
+<ParamField path="existing_profile" type="Dict" required>
+  Current profile dictionary to update
+</ParamField>
+
+<ParamField path="versioned_profile" type="VersionedProfile" required>
+  Version history container (mutated with new version)
+</ParamField>
+
+<ParamField path="new_article_text" type="str" required>
+  Article text with new evidence
+</ParamField>
+
+<ParamField path="new_article_id" type="str" required>
+  Article ID (added to `sources` list)
+</ParamField>
+
+<ParamField path="model_type" type="str" default="gemini">
+  LLM mode (`"gemini"` or `"ollama"`)
+</ParamField>
+
+<ParamField path="domain" type="str" default="guantanamo">
+  Domain configuration
+</ParamField>
+
+<ResponseField name="return" type="Tuple[Dict, VersionedProfile, list]">
+  Returns:
+  
+  1. **`updated_profile`** - Merged profile dictionary
+  2. **`versioned_profile`** - Updated version history (new version appended if `ENABLE_PROFILE_VERSIONING=True`)
+  3. **`history`** - Reflection iteration history from this update
+</ResponseField>
+
+#### Example
+
+```python
+existing = {
+    "text": "Geoffrey Miller is a retired US Army major general.",
+    "tags": ["military", "JTF-GTMO"],
+    "confidence": 0.85,
+    "sources": ["doc123"]
+}
+
+versioned = VersionedProfile()
+versioned.add_version(existing, trigger_article_id="doc123")
+
+# New article with additional information
+new_article = "In 2003, Major General Geoffrey Miller implemented new interrogation policies..."
+
+updated, versioned, history = update_profile(
+    entity_type="person",
+    entity_name="Geoffrey Miller",
+    existing_profile=existing,
+    versioned_profile=versioned,
+    new_article_text=new_article,
+    new_article_id="doc456",
+    model_type="gemini"
+)
+
+print(updated["text"])
+# "Geoffrey Miller is a retired US Army major general who served as 
+#  commander of JTF-GTMO. In 2003, he implemented new interrogation policies..."
+
+print(updated["sources"])
+# ["doc123", "doc456"]
+
+print(versioned.current_version)
+# 2
+```
+
+<Note>
+  The LLM receives **both** the existing profile and new article text, then generates a merged profile that incorporates new information while preserving established facts.
+</Note>
+
+---
+
+### update_profile_with_outcome()
+
+Safe version that never raises - returns existing profile as fallback on error.
+
+```python
+updated_profile, versioned_profile, history, outcome = update_profile_with_outcome(
+    entity_type: str,
+    entity_name: str,
+    existing_profile: Dict,
+    versioned_profile: VersionedProfile,
+    new_article_text: str,
+    new_article_id: str,
+    model_type: str = "gemini",
+    domain: str = "guantanamo"
+) -> Tuple[Dict, VersionedProfile, list, PhaseOutcome]
+```
+
+Identical to `update_profile()` but returns `PhaseOutcome` with QC report and error handling.
+
+---
+
+## Version History Control
+
+Profile versioning is controlled by the `ENABLE_PROFILE_VERSIONING` constant:
+
+```python
+from src.constants import ENABLE_PROFILE_VERSIONING
+
+if ENABLE_PROFILE_VERSIONING:
+    # Version snapshots are created on every profile create/update
+    versioned_profile.add_version(profile_data, trigger_article_id)
+else:
+    # Versioning disabled - only current profile stored
+    pass
+```
+
+When enabled, each `create_profile()` and `update_profile()` call appends a deep copy of the profile to the version history:
+
+```python
+# In entity database:
+entity = {
+    "name": "Geoffrey Miller",
+    "profile": {"text": "...", ...},  # Current profile
+    "profile_versions": {              # Version history
+        "current_version": 3,
+        "versions": [
+            {
+                "version_number": 1,
+                "profile_data": {...},
+                "created_at": "2024-01-15T10:30:00Z",
+                "trigger_article_id": "doc123"
+            },
+            {
+                "version_number": 2,
+                "profile_data": {...},
+                "created_at": "2024-01-16T14:20:00Z",
+                "trigger_article_id": "doc456"
+            },
+            # ...
+        ]
+    }
+}
+```
+
+---
+
+## Reflection & Iterative Improvement
+
+Both `create_profile()` and `update_profile()` use iterative LLM reflection via `iterative_improve()`:
+
+```python
+from src.utils.llm import iterative_improve, GenerationMode
+
+result = iterative_improve(
+    initial_text="{}",  # Start with empty JSON
+    generation_messages=[
+        {"role": "system", "content": generation_prompt},
+        {"role": "user", "content": "Create a profile for..."}
+    ],
+    reflection_prompt="Validate the profile. Check for...",
+    response_model=EntityProfile,
+    max_iterations=3,
+    mode=GenerationMode.CLOUD  # or GenerationMode.LOCAL
+)
+
+final_profile = result["text"]
+history = result["reflection_history"]
+```
+
+Each iteration:
+
+1. Generates a profile candidate
+2. Reflects on quality/completeness
+3. Returns `{"valid": bool, "reasoning": str}`
+4. If invalid, regenerates with reflection feedback
+5. Stops at first valid result or max iterations
+
+The `improvement_history` returned contains all reflection passes:
+
+```python
+[
+    {"valid": False, "reasoning": "Profile lacks specific dates and roles"},
+    {"valid": True, "reasoning": "Profile now includes complete timeline and position details"}
+]
+```
+
+---
+
+## Profile Quality Control
+
+All profiles pass through deterministic QC after generation:
+
+```python
+from src.utils.quality_controls import run_profile_qc
+
+profile, qc_report = run_profile_qc(profile=profile_dict)
+
+# qc_report contains:
+# - text_length: int
+# - citation_count: int  
+# - tag_count: int
+# - flags: List[str]  # e.g., ["short_profile", "missing_citations"]
+# - fixes: List[str]  # Applied corrections
+# - passed: bool
+```
+
+See [Quality Controls](/api/utils/quality-controls) for QC details.
+
+---
+
+## Prompt Configuration
+
+Prompts are loaded from domain configs:
+
+```python
+from src.config_loader import get_domain_config
+
+config = get_domain_config("guantanamo")
+
+# Profile generation prompt
+generation_template = config.load_profile_prompt("generation")
+system_prompt = generation_template.format(
+    entity_type="person",
+    entity_name="Geoffrey Miller",
+    article_id="doc123"
+)
+
+# Reflection validation prompt
+reflection_template = config.load_profile_prompt("reflection")
+reflection_prompt = reflection_template.format(
+    entity_type="person",
+    entity_name="Geoffrey Miller",
+    article_id="doc123"
+)
+
+# Profile update prompt
+update_template = config.load_profile_prompt("update")
+update_prompt = update_template.format(
+    entity_type="person",
+    entity_name="Geoffrey Miller"
+)
+```
+
+Prompt files live in `configs/<domain>/prompts/profile_generation.txt`, `profile_reflection.txt`, `profile_update.txt`.
+
+---
+
+## Error Handling
+
+Profile generation failures are handled gracefully:
+
+```python
+try:
+    profile, versioned, history = create_profile(...)
+except ProfileGenerationError as e:
+    # Fallback to minimal profile
+    fallback_profile = handle_profile_error(
+        entity_name, entity_type, article_id, e, "generation"
+    )
+```
+
+Fallback profiles have minimal structure:
+
+```python
+{
+    "text": f"Profile for {entity_name} could not be generated.^[{article_id}]",
+    "tags": [],
+    "confidence": 0.0,
+    "sources": [article_id]
+}
+```
+
+Use `*_with_outcome()` variants to avoid exceptions and get structured error reporting.
+
+---
+
+## Source Location
+
+`~/workspace/source/src/engine/profiles.py`

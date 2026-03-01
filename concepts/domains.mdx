@@ -1,0 +1,681 @@
+---
+title: "Research Domain Configuration"
+description: "Configure entity types, extraction prompts, deduplication thresholds, and performance settings for your historical research domain"
+---
+
+Hinbox uses **domain-specific configurations** to adapt the extraction pipeline to different historical research areas. Each domain defines its own entity types, prompts, and processing parameters without requiring code changes.
+
+## Domain Structure
+
+A domain configuration consists of these files:
+
+```
+configs/<domain>/
+├── config.yaml              # Main configuration
+├── categories/              # Entity type definitions
+│   ├── people.yaml
+│   ├── organizations.yaml
+│   ├── locations.yaml
+│   └── events.yaml
+└── prompts/                 # LLM extraction prompts
+    ├── people.md
+    ├── organizations.md
+    ├── locations.md
+    ├── events.md
+    ├── relevance.md
+    ├── profile_generation.md
+    ├── profile_update.md
+    └── profile_reflection.md
+```
+
+## Creating a New Domain
+
+<Steps>
+  <Step title="Initialize domain from template">
+    ```bash
+    just init palestine_food_history
+    ```
+    
+    This copies the template to `configs/palestine_food_history/` with generic categories and prompts.
+  </Step>
+  
+  <Step title="Configure domain settings">
+    Edit `config.yaml` to set research focus, data paths, and thresholds.
+  </Step>
+  
+  <Step title="Define entity types">
+    Edit `categories/*.yaml` files to specify relevant entity types and tags for your research domain.
+  </Step>
+  
+  <Step title="Customize extraction prompts">
+    Edit `prompts/*.md` files to provide domain-specific extraction instructions.
+  </Step>
+  
+  <Step title="Test with sample articles">
+    ```bash
+    just process --domain palestine_food_history --limit 2 --verbose
+    ```
+  </Step>
+</Steps>
+
+## Main Configuration (config.yaml)
+
+The main configuration file controls data paths, thresholds, and performance settings.
+
+### Basic Settings
+
+<CodeGroup>
+```yaml configs/guantanamo/config.yaml
+domain: "guantanamo"
+description: "Guantánamo Bay detention and related issues"
+
+# Data source configuration
+data_sources:
+  default_path: "data/guantanamo/raw_sources/miami_herald_articles.parquet"
+
+# Output configuration  
+output:
+  directory: "data/guantanamo/entities"
+```
+</CodeGroup>
+
+<ResponseField name="domain" type="string" required>
+  Unique identifier for this research domain (lowercase, underscores allowed)
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Brief description of the research focus
+</ResponseField>
+
+<ResponseField name="data_sources.default_path" type="string" required>
+  Path to source articles Parquet file
+</ResponseField>
+
+<ResponseField name="output.directory" type="string" required>
+  Directory for entity Parquet files and cache
+</ResponseField>
+
+### Deduplication Configuration
+
+Control how entities are deduplicated during the merge stage:
+
+<CodeGroup>
+```yaml Dedup Settings
+dedup:
+  similarity_thresholds:
+    default: 0.75
+    people: 0.82
+    organizations: 0.78
+    locations: 0.80
+    events: 0.76
+  
+  lexical_blocking:
+    enabled: true
+    threshold: 60        # RapidFuzz score cutoff (0-100)
+    max_candidates: 50   # max entities to run cosine similarity against
+  
+  name_variants:
+    organizations:
+      equivalence_groups:
+        - ["Department of Defense", "Defense Department", "DoD", "Pentagon"]
+        - ["American Civil Liberties Union", "ACLU"]
+    locations:
+      equivalence_groups:
+        - ["Guantanamo Bay", "Guantanamo", "GTMO"]
+        - ["United States", "U.S.", "US"]
+```
+</CodeGroup>
+
+<AccordionGroup>
+  <Accordion title="similarity_thresholds">
+    Cosine similarity thresholds (0.0-1.0) for embedding-based merge decisions. Higher values require stronger similarity before merging.
+    
+    **Recommendations**:
+    - **People**: 0.80-0.85 (names vary widely, require high confidence)
+    - **Organizations**: 0.75-0.80 (moderate variation)
+    - **Locations**: 0.78-0.82 (geographic specificity important)
+    - **Events**: 0.70-0.78 (temporal context helps disambiguation)
+  </Accordion>
+  
+  <Accordion title="lexical_blocking">
+    Fast fuzzy string matching to narrow merge candidates before expensive embedding/LLM checks.
+    
+    - `enabled`: Enable/disable lexical blocking (default: `true`)
+    - `threshold`: RapidFuzz score 0-100 (default: 60)
+    - `max_candidates`: Maximum entities to pass to embedding stage (default: 50)
+    
+    **Location**: `src/engine/mergers.py` (uses RapidFuzz library)
+  </Accordion>
+  
+  <Accordion title="name_variants.equivalence_groups">
+    Define known aliases for instant blocking without LLM calls. When any name in a group is encountered, all variants are considered equivalent.
+    
+    **Use cases**:
+    - Government agencies: `["DoD", "Department of Defense", "Pentagon"]`
+    - Acronyms: `["ACLU", "American Civil Liberties Union"]`
+    - Geographic variants: `["U.S.", "United States", "USA"]`
+    
+    **Location**: `src/utils/name_variants.py:names_likely_same`
+  </Accordion>
+</AccordionGroup>
+
+### Performance Configuration
+
+<CodeGroup>
+```yaml Performance Settings
+performance:
+  concurrency:
+    extract_workers: 8        # parallel articles in extraction phase
+    extract_per_article: 4    # parallel entity types within article
+    llm_in_flight: 16         # max concurrent cloud LLM calls
+    ollama_in_flight: 2       # max concurrent Ollama calls (local mode)
+  queue:
+    max_buffered_articles: 32  # backpressure limit for extraction → merge
+
+# Batching configuration (for embedding calls during merge)
+batching:
+  embed_batch_size: 64        # texts per embedding API call
+  embed_drain_timeout_ms: 100 # reserved for future async drain behaviour
+```
+</CodeGroup>
+
+<Note>
+**Tuning guidelines**:
+
+- **extract_workers**: Set to number of CPU cores for local mode, or 8-16 for cloud APIs
+- **extract_per_article**: Usually 4 (all entity types in parallel), set to 1 for debugging
+- **llm_in_flight**: Balance between throughput and API rate limits (Gemini: 16-32)
+- **ollama_in_flight**: Keep low (1-2) to avoid overwhelming local GPU
+- **embed_batch_size**: Larger batches reduce API calls but increase latency (32-128)
+</Note>
+
+### Caching Configuration
+
+<CodeGroup>
+```yaml Cache Settings
+cache:
+  enabled: true
+  embeddings:
+    lru_max_items: 4096         # in-memory LRU for embedding vectors
+  extraction:
+    enabled: true
+    subdir: "cache/extractions"  # persistent sidecar under output dir
+    version: 1                   # bump to invalidate all cached extractions
+  match_check:
+    enabled: true
+    max_items: 8192              # per-run LRU for match-checker results
+  articles:
+    skip_if_unchanged: true      # skip articles whose content hash hasn't changed
+```
+</CodeGroup>
+
+<Info>
+**Cache invalidation**: Bump `cache.extraction.version` when you:
+- Change extraction prompts
+- Modify entity type definitions
+- Upgrade to a new LLM model
+- Change temperature or other generation parameters
+</Info>
+
+### Merge Evidence Configuration
+
+Control how evidence text is built for embedding-based similarity:
+
+<CodeGroup>
+```yaml Evidence Settings
+merge_evidence:
+  max_chars: 1500         # truncate evidence text to this length
+  window_chars: 240       # characters per context window around mentions
+  max_windows: 3          # max context windows to extract from article
+```
+</CodeGroup>
+
+**Location**: `src/engine/mergers.py:_build_evidence_text`
+
+Evidence text format:
+```
+"John Doe, detainee, described in source as: 'John Doe was 
+transferred to Guantanamo in 2002 after being captured in 
+Afghanistan...' [240 chars] '...Doe's lawyer filed a habeas 
+corpus petition...' [240 chars]"
+```
+
+## Category Definitions (categories/*.yaml)
+
+Each entity type has a YAML file defining valid types and tags.
+
+### Structure
+
+<CodeGroup>
+```yaml people.yaml
+person_types:
+  detainee:
+    description: "A person who is or was detained at Guantánamo Bay"
+    examples: ["Mohamedou Ould Slahi", "David Hicks"]
+  
+  lawyer:
+    description: "Attorneys, legal representatives, and legal professionals"
+    examples: ["Clive Stafford Smith", "Gitanjali Gutierrez"]
+  
+  journalist:
+    description: "Reporters, writers, and media professionals"
+    examples: ["Carol Rosenberg", "Andy Worthington"]
+
+person_tags:
+  civil_rights:
+    description: "People involved in civil rights advocacy"
+    examples: ["ACLU lawyers", "Human rights activists"]
+  
+  defense:
+    description: "People involved in defense or military defense roles"
+    examples: ["Defense attorneys", "Military defense counsel"]
+```
+</CodeGroup>
+
+<Accordion title="Category File Conventions">
+  **Naming**:
+  - File names: `people.yaml`, `organizations.yaml`, `locations.yaml`, `events.yaml`
+  - Type keys: `person_types`, `organization_types`, `location_types`, `event_types`
+  - Tag keys: `person_tags`, `event_tags` (organizations/locations don't have tags)
+  
+  **Field requirements**:
+  - `description`: Clear, concise definition of the type/tag
+  - `examples`: 2-3 real examples from your domain
+  
+  **Type naming**:
+  - Use lowercase with underscores: `detention_facility`, `military_operation`
+  - Be specific to your domain: "detainee" vs. generic "prisoner"
+  - Include an `other` type as a catch-all
+</Accordion>
+
+### Example: Guantanamo Domain Categories
+
+<Tabs>
+  <Tab title="People">
+    **Types**: detainee, military, government, lawyer, journalist, other
+    
+    **Tags**: civil_rights, immigration, defense, prosecution, policy, medical, intelligence, academic, religious, family, activist
+    
+    **Location**: `configs/guantanamo/categories/people.yaml`
+  </Tab>
+  
+  <Tab title="Organizations">
+    **Types**: military, intelligence, legal, humanitarian, advocacy, media, government, intergovernmental, other
+    
+    **Examples**:
+    - Military: "Joint Task Force Guantanamo", "US Navy"
+    - Legal: "ACLU", "Center for Constitutional Rights"
+    - Humanitarian: "International Red Cross", "Physicians for Human Rights"
+    
+    **Location**: `configs/guantanamo/categories/organizations.yaml`
+  </Tab>
+  
+  <Tab title="Locations">
+    **Types**: detention_facility, military_base, city, country, region, courthouse, other
+    
+    **Examples**:
+    - Detention facility: "Guantanamo Bay", "Camp Delta", "Camp X-Ray"
+    - Military base: "Naval Station Guantanamo Bay", "Bagram Air Base"
+    
+    **Location**: `configs/guantanamo/categories/locations.yaml`
+  </Tab>
+  
+  <Tab title="Events">
+    **Types**: detention, legal, military_operation, policy_change, protest, investigation, release, medical, other
+    
+    **Tags**: torture, force_feeding, hunger_strike, transfer, interrogation, legal_challenge, habeas_corpus, medical_care, isolation, suicide_attempt, abuse, official_statement
+    
+    **Location**: `configs/guantanamo/categories/events.yaml`
+  </Tab>
+</Tabs>
+
+## Extraction Prompts (prompts/*.md)
+
+Prompts are written in **Markdown** and use placeholders for runtime interpolation.
+
+### Entity Extraction Prompt
+
+<CodeGroup>
+```markdown prompts/people.md
+# Extract People from Guantánamo Bay Articles
+
+You are analyzing historical newspaper articles about Guantánamo Bay detention.
+
+## Task
+Extract all people mentioned in the article text. For each person, provide:
+
+- **name**: Full name as it appears (e.g., "Carol Rosenberg", "Lt. Col. Morris Davis")
+- **type**: One of: {person_types}
+- **person_tags**: List of relevant tags from: {person_tags}
+- **description**: Brief description of their role or relevance (1-2 sentences)
+- **alternative_names**: List of alternative names, titles, or abbreviations
+
+## Guidelines
+
+1. **Use specific names**: Extract "Lt. Col. Morris Davis", not "military prosecutor"
+2. **Include all mentions**: Even brief references count
+3. **Preserve titles**: Keep military ranks, professional titles ("Dr.", "Judge")
+4. **Tag accurately**: Use tags that reflect the person's role in this article
+5. **No hallucinations**: Only extract people actually mentioned in the text
+
+## Output Format
+
+Return a JSON array of person objects. Example:
+
+```json
+[
+  {
+    "name": "Carol Rosenberg",
+    "type": "journalist",
+    "person_tags": [],
+    "description": "Miami Herald reporter covering Guantanamo Bay detention issues",
+    "alternative_names": []
+  },
+  {
+    "name": "Mohamedou Ould Slahi",
+    "type": "detainee",
+    "person_tags": ["civil_rights"],
+    "description": "Guantanamo detainee who wrote a memoir about his detention",
+    "alternative_names": ["Slahi"]
+  }
+]
+```
+```
+</CodeGroup>
+
+<Note>
+**Placeholder interpolation**:
+
+The extraction engine automatically replaces:
+- `{person_types}` → comma-separated list from `people.yaml`
+- `{person_tags}` → comma-separated list from `people.yaml`
+- `{entity_type}`, `{entity_name}`, `{article_id}` → runtime values
+
+**Location**: `src/engine/extractors.py:EntityExtractor.__init__`
+</Note>
+
+### Profile Generation Prompt
+
+<CodeGroup>
+```markdown prompts/profile_generation.md
+# Generate Entity Profile
+
+Create a comprehensive profile for {entity_type} **{entity_name}** based on the article text below.
+
+## Requirements
+
+1. **Factual accuracy**: Only include information directly stated in the article
+2. **Citations**: Use `[{article_id}]` to cite claims
+3. **Neutral tone**: Avoid editorializing or inserting opinions
+4. **Completeness**: Include all relevant details about the entity
+5. **Structure**: Write a coherent narrative (2-4 paragraphs)
+
+## Profile Structure
+
+- **Introduction**: Who/what is this entity?
+- **Key details**: Roles, affiliations, actions, significance
+- **Context**: Historical or situational context
+- **Citations**: Every factual claim must have `[{article_id}]`
+
+## Output Format
+
+Return a JSON object:
+
+```json
+{
+  "text": "Comprehensive profile with [article_id] citations...",
+  "tags": ["relevant", "tags"],
+  "confidence": 0.95,
+  "sources": ["{article_id}"]
+}
+```
+```
+</CodeGroup>
+
+### Relevance Prompt
+
+<CodeGroup>
+```markdown prompts/relevance.md
+# Determine Article Relevance
+
+Determine if this article is relevant to Guantánamo Bay detention research.
+
+## Relevance Criteria
+
+An article is **relevant** if it discusses:
+
+- Guantánamo Bay detention facility or detainees
+- Military commissions or legal proceedings related to Guantánamo
+- Policies, laws, or executive orders about Guantánamo detention
+- Transfer, release, or repatriation of detainees
+- Human rights issues related to Guantánamo
+- Military or legal personnel working on Guantánamo cases
+
+## Not Relevant
+
+Articles are **not relevant** if they:
+
+- Only mention Guantánamo in passing without substantive discussion
+- Focus on unrelated topics (sports, weather, local news)
+- Discuss the naval base but not the detention facility
+
+## Output Format
+
+Return a JSON object:
+
+```json
+{
+  "is_relevant": true,
+  "reason": "Article discusses detainee transfer policies"
+}
+```
+```
+</CodeGroup>
+
+## Domain Configuration Loader
+
+The `DomainConfig` class provides a unified interface for accessing domain settings.
+
+**Location**: `src/config_loader.py:11`
+
+<CodeGroup>
+```python Using DomainConfig
+from src.config_loader import DomainConfig
+
+# Load domain configuration
+config = DomainConfig("guantanamo")
+
+# Access settings
+config.get_similarity_threshold("people")  # 0.82
+config.get_lexical_blocking_config("organizations")
+config.load_prompt("people")  # Returns people.md content
+config.load_categories("events")  # Returns events.yaml dict
+
+# Performance settings
+cc = config.get_concurrency_config()
+print(cc["extract_workers"])  # 8
+print(cc["llm_in_flight"])  # 16
+
+# Cache settings
+cache_cfg = config.get_cache_config()
+print(cache_cfg["extraction"]["version"])  # 1
+```
+</CodeGroup>
+
+<Accordion title="Available DomainConfig Methods">
+  <ResponseField name="load_config()" type="Dict">
+    Load main config.yaml
+  </ResponseField>
+  
+  <ResponseField name="load_categories(entity_type)" type="Dict">
+    Load category YAML (people.yaml, organizations.yaml, etc.)
+  </ResponseField>
+  
+  <ResponseField name="load_prompt(entity_type)" type="str">
+    Load extraction prompt Markdown
+  </ResponseField>
+  
+  <ResponseField name="load_profile_prompt(prompt_type)" type="str">
+    Load profile prompt ("generation", "update", "reflection")
+  </ResponseField>
+  
+  <ResponseField name="get_similarity_threshold(entity_type?)" type="float">
+    Get similarity threshold with fallback to default
+  </ResponseField>
+  
+  <ResponseField name="get_lexical_blocking_config(entity_type?)" type="Dict">
+    Get lexical blocking settings with per-type overrides
+  </ResponseField>
+  
+  <ResponseField name="get_concurrency_config()" type="Dict">
+    Get worker/thread counts and queue limits
+  </ResponseField>
+  
+  <ResponseField name="get_cache_config()" type="Dict">
+    Get cache settings (extraction, embeddings, match_check, articles)
+  </ResponseField>
+  
+  <ResponseField name="get_name_variants_config(entity_type)" type="Dict">
+    Get equivalence groups and acronym stopwords
+  </ResponseField>
+</Accordion>
+
+## Example: Custom Domain Configuration
+
+Here's how you might configure a domain for **Soviet-Afghan War research**:
+
+<CodeGroup>
+```yaml configs/soviet_afghan_war/config.yaml
+domain: "soviet_afghan_war"
+description: "Soviet-Afghan War (1979-1989) military and political history"
+
+data_sources:
+  default_path: "data/soviet_afghan_war/raw_sources/articles.parquet"
+
+output:
+  directory: "data/soviet_afghan_war/entities"
+
+dedup:
+  similarity_thresholds:
+    default: 0.75
+    people: 0.80        # military names vary
+    organizations: 0.78
+    locations: 0.82     # geographic precision important
+    events: 0.74        # battles have similar descriptions
+  
+  name_variants:
+    organizations:
+      equivalence_groups:
+        - ["KGB", "Committee for State Security"]
+        - ["Mujahideen", "Afghan Resistance"]
+    locations:
+      equivalence_groups:
+        - ["Afghanistan", "Islamic Republic of Afghanistan"]
+        - ["Kabul", "Kabul Province"]
+
+performance:
+  concurrency:
+    extract_workers: 4  # conservative for local mode
+    extract_per_article: 2
+    llm_in_flight: 8
+```
+```yaml configs/soviet_afghan_war/categories/people.yaml
+person_types:
+  military_leader:
+    description: "Soviet or Afghan military commanders and officers"
+    examples: ["Leonid Brezhnev", "Ahmad Shah Massoud"]
+  
+  politician:
+    description: "Political leaders and government officials"
+    examples: ["Mikhail Gorbachev", "Babrak Karmal"]
+  
+  combatant:
+    description: "Soldiers, fighters, and military personnel"
+    examples: ["Soviet soldiers", "Mujahideen fighters"]
+  
+  diplomat:
+    description: "Diplomatic personnel and international negotiators"
+    examples: ["UN mediators", "Foreign ministry officials"]
+  
+  journalist:
+    description: "Reporters and war correspondents"
+    examples: ["War correspondents", "Soviet journalists"]
+
+person_tags:
+  soviet:
+    description: "Soviet personnel and officials"
+  
+  afghan:
+    description: "Afghan nationals and personnel"
+  
+  international:
+    description: "International observers, diplomats, or aid workers"
+```
+</CodeGroup>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Start with the template">
+    Always initialize new domains from the template:
+    
+    ```bash
+    just init my_research_domain
+    ```
+    
+    The template provides a working baseline with sensible defaults.
+  </Accordion>
+  
+  <Accordion title="Test incrementally">
+    Process a small batch (2-5 articles) after each configuration change:
+    
+    ```bash
+    just process --domain my_research_domain --limit 2 --verbose
+    ```
+    
+    Review extraction quality before processing the full corpus.
+  </Accordion>
+  
+  <Accordion title="Be specific in prompts">
+    Generic prompts produce generic results. Include:
+    - **Domain context**: "You are analyzing articles about X..."
+    - **Real examples**: Show the LLM what good output looks like
+    - **Edge cases**: Address common errors ("Don't extract 'military bases' as a name...")
+  </Accordion>
+  
+  <Accordion title="Tune thresholds empirically">
+    Default similarity thresholds (0.75-0.82) work well for many domains, but:
+    - **Increase** for domains with high name ambiguity (common names, many variants)
+    - **Decrease** for domains with consistent naming (technical terms, proper nouns)
+    - Monitor merge decisions in logs to identify false positives/negatives
+  </Accordion>
+  
+  <Accordion title="Version extraction cache">
+    Bump `cache.extraction.version` when you change:
+    - Extraction prompts (even minor wording changes)
+    - Category definitions (types or tags)
+    - LLM model or temperature
+    
+    This ensures re-extraction with the new configuration.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Processing Pipeline" icon="diagram-project" href="/concepts/pipeline">
+    Learn how domain configurations drive the 5-stage pipeline
+  </Card>
+  
+  <Card title="Entity Types" icon="shapes" href="/concepts/entities">
+    Understand entity structure and required fields
+  </Card>
+  
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Process your first batch of articles with a custom domain
+  </Card>
+  
+  <Card title="System Architecture" icon="sitemap" href="/concepts/architecture">
+    Explore the producer-consumer model and evidence-first merge
+  </Card>
+</CardGroup>

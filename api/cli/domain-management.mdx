@@ -1,0 +1,382 @@
+---
+title: "Domain Management Commands"
+description: "Initialize, list, and manage domain configurations for different research projects"
+---
+
+## Overview
+
+Domain commands help you manage separate research projects ("domains"), each with its own entity types, extraction prompts, and data outputs. Each domain is isolated from others.
+
+## Commands
+
+### `just init`
+
+Initialize a new domain configuration by copying the template.
+
+```bash
+just init <domain_name>
+```
+
+<ParamField path="domain_name" type="string" required>
+  Name for the new domain. Must be alphanumeric (letters and numbers only, no spaces or special characters).
+  
+  **Examples:**
+  - `guantanamo` ✅
+  - `vietnam_war` ❌ (contains underscore)
+  - `coldwar` ✅
+  - `my-project` ❌ (contains hyphen)
+</ParamField>
+
+**Source:** `scripts/init_domain.py`
+
+## Usage Examples
+
+<CodeGroup>
+```bash Create new domain
+just init coldwar
+```
+
+```bash Invalid domain name
+just init vietnam_war
+# Error: Domain name 'vietnam_war' must be alphanumeric
+```
+
+```bash Domain already exists
+just init guantanamo
+# Error: Domain 'guantanamo' already exists
+```
+</CodeGroup>
+
+## What Gets Created
+
+When you run `just init <domain>`, the system:
+
+<Steps>
+  <Step title="Copy Template">
+    Copies the entire `configs/template/` directory to `configs/<domain>/`.
+  </Step>
+  
+  <Step title="Process Template Files">
+    Finds all `.template` files and:
+    1. Replaces `{DOMAIN_NAME}` with your domain name
+    2. Replaces `{DOMAIN_DESCRIPTION}` with auto-generated description
+    3. Removes `.template` extension
+  </Step>
+  
+  <Step title="Success Message">
+    Prints confirmation and next steps.
+  </Step>
+</Steps>
+
+### Directory Structure
+
+After running `just init myproject`, you'll have:
+
+```
+configs/myproject/
+├── config.yaml              # Main domain configuration
+├── prompts/
+│   ├── people.txt          # Entity extraction prompts
+│   ├── events.txt
+│   ├── locations.txt
+│   └── organizations.txt
+├── types/
+│   ├── people.yaml         # Entity type schemas
+│   ├── events.yaml
+│   ├── locations.yaml
+│   └── organizations.yaml
+└── tags/
+    ├── people_tags.yaml    # Tag taxonomies
+    ├── event_tags.yaml
+    ├── location_tags.yaml
+    └── organization_tags.yaml
+```
+
+## Configuration Files
+
+### Main Config: `config.yaml`
+
+Defines domain-level settings:
+
+```yaml configs/myproject/config.yaml
+name: myproject
+description: Articles and analysis related to myproject
+
+data_path: data/myproject/raw_sources/articles.parquet
+output_dir: data/myproject/output
+
+# Entity types to extract
+entity_types:
+  - people
+  - events
+  - locations
+  - organizations
+
+# Merge thresholds per entity type
+thresholds:
+  people:
+    lexical_match: 0.85
+    embedding_similarity: 0.82
+    # ... more settings
+
+# Processing concurrency
+concurrency:
+  extract_workers: 3
+  extract_per_article: 4
+  llm_in_flight: 10
+```
+
+### Entity Type Schemas: `types/*.yaml`
+
+Define fields for each entity type:
+
+```yaml types/people.yaml
+name: Person
+fields:
+  - name: name
+    type: string
+    required: true
+    description: Full name of the person
+  
+  - name: role
+    type: string
+    description: Primary role or occupation
+  
+  - name: dates
+    type: string
+    description: Relevant dates (birth, death, active years)
+```
+
+### Extraction Prompts: `prompts/*.txt`
+
+LLM prompts for entity extraction:
+
+```txt prompts/people.txt
+You are analyzing historical documents to extract information about people.
+
+For each person mentioned, extract:
+- Full name (as written in the document)
+- Role or occupation
+- Key dates mentioned
+- Brief profile summarizing their involvement
+
+Be precise and only extract information explicitly stated in the text.
+```
+
+### Tag Taxonomies: `tags/*_tags.yaml`
+
+Controlled vocabularies for categorization:
+
+```yaml tags/people_tags.yaml
+categories:
+  - name: Military
+    description: Military personnel
+    values:
+      - Soldier
+      - Officer
+      - General
+  
+  - name: Political
+    description: Political figures
+    values:
+      - President
+      - Senator
+      - Ambassador
+```
+
+## Listing Domains
+
+### `just domains`
+
+List all available domain configurations with descriptions.
+
+```bash
+just domains
+```
+
+**Source:** `scripts/list_domains.py`
+
+### Output Example
+
+```bash
+$ just domains
+
+Available domains:
+  • guantanamo: Guantanamo Bay detention facility articles and detainee information
+  • coldwar: Cold War era events, figures, and geopolitical analysis
+  • vietnam: Vietnam War historical records and personnel data
+  • template: Template domain for creating new configurations
+```
+
+### Domain Information
+
+For each domain, the command shows:
+- **Name:** Domain identifier used in commands
+- **Description:** From `config.yaml` in the domain directory
+
+<Note>
+  If a domain config file is malformed, you'll see a warning instead of the description.
+</Note>
+
+## Working with Domains
+
+### After Creating a Domain
+
+<Steps>
+  <Step title="Customize Configuration">
+    Edit `configs/<domain>/config.yaml` to set:
+    - Data paths
+    - Output directories
+    - Merge thresholds
+    - Concurrency settings
+  </Step>
+  
+  <Step title="Customize Entity Types">
+    Edit files in `configs/<domain>/types/` to define the fields you need for each entity type.
+  </Step>
+  
+  <Step title="Write Extraction Prompts">
+    Customize prompts in `configs/<domain>/prompts/` to guide the LLM on what information to extract and how.
+  </Step>
+  
+  <Step title="Define Tag Taxonomies">
+    Edit `configs/<domain>/tags/` to create controlled vocabularies for categorizing entities.
+  </Step>
+  
+  <Step title="Add Source Data">
+    Place your articles Parquet file at the `data_path` specified in `config.yaml`.
+  </Step>
+  
+  <Step title="Start Processing">
+    Run `just process-domain <domain>` to begin extraction.
+  </Step>
+</Steps>
+
+### Switching Between Domains
+
+Process different domains by specifying the `--domain` flag:
+
+<CodeGroup>
+```bash Process guantanamo domain
+just process --domain guantanamo --limit 10
+```
+
+```bash Process coldwar domain
+just process --domain coldwar --limit 5
+```
+
+```bash Use domain-specific command
+just process-domain vietnam --limit 20
+```
+</CodeGroup>
+
+## Domain Isolation
+
+Each domain is completely isolated:
+
+| Aspect | Isolation |
+|--------|----------|
+| **Config** | Separate `configs/<domain>/` directory |
+| **Data** | Separate `data/<domain>/` directory |
+| **Entities** | Separate Parquet files per domain |
+| **Processing status** | Separate `processing_status.json` per domain |
+| **Cache** | Separate `extraction_cache/` per domain |
+
+<Warning>
+  Entity merging only happens within a domain. Entities from different domains are never merged together.
+</Warning>
+
+## Advanced Configuration
+
+### Custom Data Paths
+
+Override the default data path for a domain:
+
+```bash
+just process --domain myproject --articles-path /custom/path/articles.parquet
+```
+
+### Per-Domain Concurrency
+
+Tune processing speed per domain:
+
+```yaml configs/high-volume/config.yaml
+concurrency:
+  extract_workers: 8        # More parallel article processors
+  extract_per_article: 4
+  llm_in_flight: 20        # More concurrent API calls
+```
+
+### Per-Domain Thresholds
+
+Adjust entity merging sensitivity:
+
+```yaml configs/strict-matching/config.yaml
+thresholds:
+  people:
+    lexical_match: 0.90     # Higher = stricter matching
+    embedding_similarity: 0.88
+```
+
+## Template Domain
+
+The `template` domain in `configs/template/` serves as the blueprint for new domains.
+
+**To modify the template:**
+
+1. Edit files in `configs/template/`
+2. Use `{DOMAIN_NAME}` and `{DOMAIN_DESCRIPTION}` placeholders
+3. Add `.template` extension to files that need placeholder replacement
+
+**Example template file:**
+
+```yaml configs/template/config.yaml.template
+name: {DOMAIN_NAME}
+description: {DOMAIN_DESCRIPTION}
+
+data_path: data/{DOMAIN_NAME}/raw_sources/articles.parquet
+output_dir: data/{DOMAIN_NAME}/output
+```
+
+## Error Reference
+
+<AccordionGroup>
+  <Accordion title="Domain name must be alphanumeric">
+    **Cause:** Domain name contains spaces, hyphens, underscores, or special characters.
+    
+    **Solution:** Use only letters and numbers (e.g., `coldwar`, `vietnam1965`).
+  </Accordion>
+  
+  <Accordion title="Domain already exists">
+    **Cause:** A directory with that domain name already exists in `configs/`.
+    
+    **Solution:** Choose a different name or delete the existing domain directory if you want to recreate it.
+  </Accordion>
+  
+  <Accordion title="Template directory not found">
+    **Cause:** `configs/template/` is missing from the repository.
+    
+    **Solution:** Ensure you have a complete clone of the repository. The template should be in `configs/template/`.
+  </Accordion>
+  
+  <Accordion title="Failed to initialize domain">
+    **Cause:** Permissions error or disk space issue.
+    
+    **Solution:** Check that you have write permissions in the `configs/` directory and sufficient disk space.
+  </Accordion>
+</AccordionGroup>
+
+## Command Reference Summary
+
+| Command | Purpose | Example |
+|---------|---------|----------|
+| `just init <name>` | Create new domain | `just init coldwar` |
+| `just domains` | List all domains | `just domains` |
+| `just process --domain <name>` | Process specific domain | `just process --domain coldwar` |
+| `just process-domain <name>` | Shortcut for domain processing | `just process-domain coldwar` |
+
+## See Also
+
+- [Process & Extraction](/api/cli/process) - Process articles for a domain
+- [Configuration Reference](/guides/configuration) - Complete config options
+- [Entity Types](/guides/creating-domains) - Define custom entity schemas

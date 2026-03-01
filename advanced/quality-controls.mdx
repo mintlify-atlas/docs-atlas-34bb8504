@@ -1,0 +1,547 @@
+---
+title: 'Quality Controls'
+description: 'Deterministic validation, automatic retry, and extraction quality thresholds'
+icon: 'shield-check'
+---
+
+## Overview
+
+Hinbox applies **multi-layer quality controls** to ensure extraction accuracy without requiring manual review:
+
+1. **Extraction QC**: Validates entity structure, required fields, and detects hallucinations
+2. **Automatic Retry**: Re-runs extraction with repair hints when severe issues detected
+3. **Profile QC**: Validates generated profiles for completeness and grounding
+4. **Relevance Filtering**: Checks entities are actually mentioned in source articles
+
+<Info>
+  All QC is **deterministic** (no LLM calls) except for retry, which uses structured feedback to guide re-extraction.
+</Info>
+
+## Extraction Quality Control
+
+### What Gets Checked
+
+From `src/utils/quality_controls.py:218-306`, the `run_extraction_qc` function validates:
+
+```python
+def run_extraction_qc(
+    *,
+    entity_type: str,
+    entities: List[Dict[str, Any]],
+    domain: str = "guantanamo",
+    min_name_len: int = QC_MIN_NAME_LENGTH,
+) -> Tuple[List[Dict[str, Any]], ExtractionQCReport]:
+    """Run deterministic QC on a batch of extracted entities.
+
+    Returns (cleaned_entities, report). Never raises.
+    """
+```
+
+#### 1. Required Fields
+
+Each entity type has mandatory fields from `src/utils/quality_controls.py:40-46`:
+
+```python
+_FALLBACK_REQUIRED_FIELDS: Dict[str, Set[str]] = {
+    "people": {"name"},
+    "organizations": {"name"},
+    "locations": {"name"},
+    "events": {"title", "description", "event_type", "start_date"},
+}
+```
+
+**Example failure**:
+```json
+{"name": "", "role": "general"}  // Dropped: empty name
+{"title": "Battle"}  // Dropped: missing description, event_type, start_date
+```
+
+#### 2. Name Normalization
+
+From `src/utils/quality_controls.py:94-98`:
+
+```python
+def normalize_name(s: Any) -> str:
+    """Normalize an entity name: strip/collapse whitespace, normalize unicode."""
+    text = str(s or "").strip()
+    text = " ".join(text.split())  # collapse whitespace runs
+    return unicodedata.normalize("NFC", text)
+```
+
+**Example**:
+```
+Input:  "John  \n  Doe"  (extra spaces, newline)
+Output: "John Doe"  (normalized)
+```
+
+#### 3. Minimum Name Length
+
+From `src/constants.py:44`:
+```python
+QC_MIN_NAME_LENGTH = 3
+```
+
+Names shorter than 3 characters trigger a warning flag (but aren't dropped).
+
+#### 4. Within-Article Deduplication
+
+Duplicates within a single article extraction are collapsed by key:
+- **People**: `(name,)`
+- **Organizations**: `(name, type)`
+- **Locations**: `(name, type)`
+- **Events**: `(title, start_date)`
+
+From `src/utils/quality_controls.py:101-112`:
+
+```python
+def _entity_dedup_key(entity_type: str, e: Dict[str, Any]) -> Tuple:
+    """Derive a dedup key for within-article deduplication."""
+    if entity_type == "people":
+        return (normalize_name(e.get("name")),)
+    if entity_type in ("organizations", "locations"):
+        return (normalize_name(e.get("name")), str(e.get("type") or "").strip())
+    if entity_type == "events":
+        return (
+            normalize_name(e.get("title")),
+            str(e.get("start_date") or "").strip(),
+        )
+```
+
+#### 5. Name Variant Collapsing
+
+For organizations and locations, detects when extracted entities refer to the same real-world entity via:
+- Acronym matching ("DoD" ↔ "Department of Defense")
+- Substring containment
+- Equivalence groups from config.yaml
+
+From `src/utils/quality_controls.py:127-215`:
+
+```python
+def _collapse_within_article_variants(
+    *,
+    entity_type: str,
+    entities: List[Dict[str, Any]],
+    domain: str = "guantanamo",
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Collapse name variants within a single article's extraction results.
+
+    For organizations and locations, detects when two extracted entities
+    likely refer to the same real-world entity (via acronym matching,
+    substring containment, or configured equivalence groups) and merges
+    them — keeping the more canonical name (proper nouns over descriptive
+    phrases) and adding the other to an ``aliases`` list.
+    """
+```
+
+**Example**:
+```
+Extracted: ["DoD", "Department of Defense", "Pentagon"]
+Collapsed: ["Department of Defense" {aliases: ["DoD", "Pentagon"]}]
+```
+
+### QC Report Structure
+
+From `src/utils/quality_controls.py:83-91`:
+
+```python
+class ExtractionQCReport(BaseModel):
+    """Summary of what extraction QC did to a batch of entities."""
+
+    input_count: int = 0
+    dropped_missing_required: int = 0
+    deduped: int = 0
+    output_count: int = 0
+    flags: List[str] = Field(default_factory=list)
+    fixes: Dict[str, Any] = Field(default_factory=dict)
+```
+
+**Example report**:
+```json
+{
+  "input_count": 15,
+  "dropped_missing_required": 2,
+  "deduped": 3,
+  "output_count": 10,
+  "flags": ["high_drop_rate", "many_low_quality_names"],
+  "fixes": {"normalized_names": 5, "collapsed_variants": 3}
+}
+```
+
+## Automatic Retry Logic
+
+When QC detects **severe issues**, extraction is retried once with a repair hint.
+
+### Retry Triggers
+
+From `src/utils/quality_controls.py:289-292`:
+
+```python
+if report.dropped_missing_required > len(entities) * 0.5 and len(entities) > 2:
+    flags.append("high_drop_rate")
+if report.deduped > len(entities) * 0.5 and len(entities) > 2:
+    flags.append("many_duplicates")
+```
+
+**Severe flags that trigger retry**:
+- `high_drop_rate`: >50% of entities dropped for missing required fields
+- `many_duplicates`: >50% of entities were duplicates
+- `many_low_quality_names`: ≥2 entities with generic/descriptive names
+- `zero_entities`: LLM returned empty list
+
+### Retry Implementation
+
+From test coverage in `tests/test_extraction_retry.py`, the retry flow:
+
+1. **Initial extraction** → QC detects severe issue
+2. **Build repair hint** describing what went wrong
+3. **Retry extraction** with augmented prompt including hint
+4. **QC again** → If still severe, accept best attempt
+
+**Example repair hint**:
+```
+Previous extraction had issues:
+- High drop rate: 8/12 entities missing required fields
+- Many duplicates: 6/12 entities were duplicates
+
+Please:
+- Ensure all required fields are populated
+- Avoid extracting the same entity multiple times with slight variations
+```
+
+<Warning>
+  **Retry happens at most once** to avoid infinite loops. After retry, even if QC still fails, the best available result is used.
+</Warning>
+
+## Relevance Filtering
+
+After extraction, entities are checked for **mention validation** to catch hallucinations.
+
+### How It Works
+
+From `src/utils/quality_controls.py:323-425`:
+
+```python
+def filter_entities_by_article_relevance(
+    *,
+    entity_type: str,
+    entities: List[Dict[str, Any]],
+    article_text: str,
+    domain: str = "guantanamo",
+    require_mention: bool = True,
+) -> Tuple[List[Dict[str, Any]], EntityRelevanceReport]:
+    """Filter out entities whose names don't appear in the source article text.
+
+    For each entity, builds a set of "needles" from its name, aliases,
+    computed acronyms, and domain equivalence group variants. If none of
+    those needles appear in the article text, the entity is dropped as
+    likely hallucinated.
+    """
+```
+
+### Needle Construction
+
+For each entity, the filter checks if **any** of these appear in article text:
+
+1. **Canonical name** (e.g., "Department of Defense")
+2. **Aliases** from within-article dedup (e.g., "DoD", "Pentagon")
+3. **Computed acronym** for orgs/locations (e.g., "FBI" from "Federal Bureau of Investigation")
+4. **Equivalence group variants** from config.yaml
+
+### Short Name Handling
+
+From `src/utils/quality_controls.py:403-412`:
+
+```python
+for needle in needles:
+    needle_lower = needle.lower()
+    if len(needle_lower) <= 3:
+        # Short needles: use word boundary to avoid matching inside words
+        pattern = r"\b" + re.escape(needle_lower) + r"\b"
+        if re.search(pattern, article_lower):
+            found = True
+            break
+    else:
+        if needle_lower in article_lower:
+            found = True
+```
+
+**Example**: "CIA" must match as a full word, not inside "appreciation".
+
+## Profile Quality Control
+
+Generated entity profiles undergo separate validation from `src/utils/quality_controls.py:444-504`:
+
+### Profile QC Checks
+
+```python
+class ProfileQCReport(BaseModel):
+    """Summary of profile quality checks."""
+
+    text_length: int = 0
+    citation_count: int = 0
+    tag_count: int = 0
+    confidence: Optional[float] = None
+    passed: bool = True
+    flags: List[str] = Field(default_factory=list)
+    fixes: Dict[str, Any] = Field(default_factory=dict)
+```
+
+#### 1. Text Length
+
+From `src/constants.py:45`:
+```python
+PROFILE_QC_MIN_TEXT_LENGTH = 100
+```
+
+Profiles shorter than 100 characters fail QC.
+
+#### 2. Citations
+
+From `src/utils/quality_controls.py:33`:
+```python
+CITATION_RE = re.compile(r"\^\[([^\]\s]+)\]")
+```
+
+Expected format: `^[article_id]` (e.g., `^[art-12345]`).
+
+**Failure**: Profile text with zero citations gets flagged.
+
+#### 3. Tags
+
+From `src/constants.py:46`:
+```python
+PROFILE_QC_MIN_TAG_COUNT = 1
+```
+
+Profiles must have at least 1 tag. Missing tags get defaulted to `["needs-review"]`.
+
+#### 4. Confidence Validation
+
+From `src/utils/quality_controls.py:483-495`:
+
+```python
+# Confidence check
+confidence = profile.get("confidence")
+if confidence is None or not isinstance(confidence, (int, float)):
+    flags.append("confidence_missing_or_invalid")
+    profile["confidence"] = 0.0
+    fixes["confidence_set_default"] = True
+    report.confidence = 0.0
+else:
+    if confidence < 0.0 or confidence > 1.0:
+        flags.append("confidence_clamped")
+        profile["confidence"] = max(0.0, min(1.0, float(confidence)))
+        fixes["confidence_clamped"] = True
+```
+
+**Example**:
+```json
+{"confidence": 1.5}  // Clamped to 1.0
+{"confidence": null}  // Set to 0.0
+```
+
+## Profile Grounding Verification
+
+Post-processing step verifies that profile claims are supported by cited sources.
+
+### How It Works
+
+From `src/utils/quality_controls.py:601-750`:
+
+```python
+def verify_profile_grounding(
+    *,
+    profile_text: str,
+    article_texts: Dict[str, str],
+    model_type: str = "gemini",
+    max_article_chars: int = 12000,
+    max_claim_chars: int = 600,
+    min_grounding_score: float = 0.7,
+) -> GroundingReport:
+    """Verify that profile claims are supported by their cited sources.
+
+    Extracts citations from profile text, groups them by article, and uses
+    an LLM call per article to verify each claim. Returns a GroundingReport
+    with per-claim details and summary statistics.
+    """
+```
+
+### Grounding Workflow
+
+<Steps>
+  <Step title="Extract Citations">
+    Parse all `^[article_id]` citations from profile text:
+
+    ```python
+    citations = CITATION_RE.findall(profile_text)
+    # Example: ["art-123", "art-456", "art-123"]
+    ```
+  </Step>
+
+  <Step title="Group by Source Article">
+    Group claims by which article they cite:
+
+    ```python
+    # claims_for_article["art-123"] = [
+    #   {"citation": "^[art-123]", "claim": "served as commander in 2003"},
+    #   {"citation": "^[art-123]", "claim": "oversaw detention operations"}
+    # ]
+    ```
+  </Step>
+
+  <Step title="LLM Verification">
+    One LLM call per source article verifies all claims citing it:
+
+    ```python
+    messages = [
+        {"role": "system", "content": _GROUNDING_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Verify: {claims_text}"}
+    ]
+    verifications = cloud_generation(
+        messages=messages,
+        response_model=List[ClaimVerification],
+        temperature=0,
+    )
+    ```
+  </Step>
+
+  <Step title="Compute Grounding Score">
+    ```python
+    grounding_score = verified_claims / total_citations
+    # Example: 8/10 = 0.8 (80% of claims supported)
+    ```
+  </Step>
+</Steps>
+
+### Support Levels
+
+From `src/utils/quality_controls.py:512-517`:
+
+```python
+class SupportLevel(str, Enum):
+    SUPPORTED = "supported"
+    PARTIAL = "partial"
+    NOT_SUPPORTED = "not_supported"
+    UNCLEAR = "unclear"
+    MISSING_SOURCE = "missing_source"
+```
+
+**Interpretation**:
+- **SUPPORTED**: Source article clearly confirms the claim
+- **PARTIAL**: Some details confirmed, others not mentioned
+- **NOT_SUPPORTED**: Source contradicts or doesn't mention claim
+- **UNCLEAR**: Ambiguous source text
+- **MISSING_SOURCE**: Cited article not available for verification
+
+### Grounding Report
+
+From `src/utils/quality_controls.py:530-541`:
+
+```python
+class GroundingReport(BaseModel):
+    """Summary of profile grounding verification."""
+
+    profile_text_hash: str = ""
+    total_citations: int = 0
+    verified: int = 0
+    unverified: int = 0
+    missing_source: int = 0
+    grounding_score: Optional[float] = None
+    passed: bool = True
+    flags: List[str] = Field(default_factory=list)
+    verifications: List[ClaimVerification] = Field(default_factory=list)
+```
+
+**Example**:
+```json
+{
+  "total_citations": 12,
+  "verified": 10,
+  "unverified": 1,
+  "missing_source": 1,
+  "grounding_score": 0.83,
+  "passed": true,
+  "flags": []
+}
+```
+
+## Configuration Thresholds
+
+All QC thresholds are configurable via `src/constants.py:44-46`:
+
+```python
+# Quality control thresholds
+QC_MIN_NAME_LENGTH = 3
+PROFILE_QC_MIN_TEXT_LENGTH = 100
+PROFILE_QC_MIN_TAG_COUNT = 1
+```
+
+To override, edit constants.py or set via environment variables (not currently supported, but easy to add).
+
+## QC in the Pipeline
+
+QC is invoked from `src/engine/article_processor.py` during extraction:
+
+```python
+# After LLM extraction
+for entity_type in ["people", "organizations", "locations", "events"]:
+    entities, qc_report = run_extraction_qc(
+        entity_type=entity_type,
+        entities=raw_entities,
+        domain=self.domain,
+    )
+    
+    # Check for severe issues
+    if "high_drop_rate" in qc_report.flags or "zero_entities" in qc_report.flags:
+        # Trigger retry with repair hint
+        entities = self._retry_extraction(entity_type, article, qc_report)
+```
+
+## Monitoring QC Results
+
+Logs show QC actions in real-time:
+
+```
+[DEBUG] Dropped people entity missing required field 'name': {'role': 'general'}
+[DEBUG] Collapsed 'DoD' into 'Department of Defense' (aliases: ['DoD', 'Pentagon'])
+[INFO] Extraction QC: 12 input → 10 output (dropped=2, deduped=3)
+[WARNING] High drop rate detected, triggering retry
+[SUCCESS] Retry successful: 15 entities extracted
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Tune Domain Prompts" icon="pen">
+    Clear extraction prompts reduce QC failures. See `configs/{domain}/prompts/`.
+  </Card>
+
+  <Card title="Add Equivalence Groups" icon="arrows-repeat">
+    Configure known name variants in config.yaml to reduce false dedup.
+  </Card>
+
+  <Card title="Monitor Retry Rate" icon="chart-line">
+    High retry rates indicate prompt or model issues. Check logs for patterns.
+  </Card>
+
+  <Card title="Review Low Grounding Scores" icon="magnifying-glass">
+    Profiles with grounding below 0.7 may have hallucinations. Inspect verifications.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Caching" icon="database" href="/advanced/caching">
+    Skip QC re-runs with extraction cache
+  </Card>
+  <Card title="Performance" icon="gauge" href="/advanced/performance">
+    Balance QC rigor with extraction speed
+  </Card>
+  <Card title="Local Models" icon="server" href="/advanced/local-models">
+    QC works identically for cloud and local models
+  </Card>
+  <Card title="Privacy Mode" icon="lock" href="/advanced/privacy-mode">
+    All QC is deterministic (local-only)
+  </Card>
+</CardGroup>

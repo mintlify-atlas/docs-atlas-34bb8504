@@ -1,0 +1,293 @@
+---
+title: 'Using Local Models'
+description: 'Run entity extraction completely locally with Ollama for privacy and cost control'
+icon: 'server'
+---
+
+## Overview
+
+Hinbox supports running entity extraction entirely on your local machine using [Ollama](https://ollama.com). This is ideal for:
+
+- **Sensitive historical research** requiring data privacy
+- **Cost control** when processing large document collections  
+- **Offline processing** without internet connectivity
+- **Custom model experimentation** with different LLMs
+
+## Model Configuration
+
+Hinbox uses environment variables to configure both cloud and local models, defined in `src/constants.py:7-8`:
+
+```python
+CLOUD_MODEL = os.getenv("HINBOX_CLOUD_MODEL", "gemini/gemini-2.0-flash")
+OLLAMA_MODEL = os.getenv("HINBOX_OLLAMA_MODEL", "ollama/qwen2.5:32b-instruct-q5_K_M")
+```
+
+### Default Models
+
+- **Cloud**: `gemini/gemini-2.0-flash` (via LiteLLM)
+- **Local**: `qwen2.5:32b-instruct-q5_K_M` (~23GB download)
+
+## Setup
+
+<Steps>
+  <Step title="Install Ollama">
+    Download and install Ollama from [ollama.com](https://ollama.com)
+
+    ```bash
+    # macOS / Linux
+    curl -fsSL https://ollama.com/install.sh | sh
+    
+    # Or download from https://ollama.com
+    ```
+  </Step>
+
+  <Step title="Pull the Default Model">
+    Download the Qwen 2.5 32B model (default for Hinbox):
+
+    ```bash
+    ollama pull qwen2.5:32b-instruct-q5_K_M
+    ```
+
+    <Info>
+      This downloads ~23GB. Qwen 2.5 32B provides excellent extraction quality while fitting in 24GB+ VRAM systems.
+    </Info>
+  </Step>
+
+  <Step title="Configure Context Window">
+    Ollama defaults to conservative context windows. Qwen 2.5 supports up to 131K tokens:
+
+    ```bash
+    # Add to your shell profile or systemd unit
+    export OLLAMA_CONTEXT_LENGTH=32768
+    ```
+
+    <Warning>
+      Higher context uses more VRAM. Start with 32768 and adjust based on your GPU memory.
+    </Warning>
+  </Step>
+
+  <Step title="Verify Ollama is Running">
+    The Ollama server should auto-start. Test it:
+
+    ```bash
+    curl http://localhost:11434/v1/models
+    ```
+
+    Expected output: JSON list of available models
+  </Step>
+</Steps>
+
+## Running with Local Models
+
+Use the `--local` flag to switch to Ollama:
+
+```bash
+just process --domain guantanamo --limit 5 --local
+```
+
+This automatically:
+- Uses the `HINBOX_OLLAMA_MODEL` for extraction
+- Switches to local embeddings
+- Disables all LLM telemetry (see [Privacy Mode](/advanced/privacy-mode))
+
+### API Configuration
+
+By default, Hinbox connects to `http://localhost:11434/v1`. Override via environment variable:
+
+```bash
+# .env file
+OLLAMA_API_URL=http://192.168.1.100:11434/v1
+```
+
+From `src/constants.py:15`:
+```python
+OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/v1").strip()
+```
+
+## Switching Models
+
+### Using a Different Ollama Model
+
+Override the default without editing code:
+
+```bash
+# .env file
+HINBOX_OLLAMA_MODEL=ollama/llama3.1:70b
+```
+
+Then pull the new model:
+```bash
+ollama pull llama3.1:70b
+```
+
+### Supported Model Families
+
+Any Ollama-compatible model works via LiteLLM integration. Popular choices:
+
+<CardGroup cols={2}>
+  <Card title="Qwen 2.5 32B" icon="star">
+    **Default**. Excellent quality, fits 24GB VRAM
+    ```bash
+    ollama pull qwen2.5:32b-instruct-q5_K_M
+    ```
+  </Card>
+
+  <Card title="Llama 3.1 70B" icon="brain">
+    Highest quality, requires 48GB+ VRAM
+    ```bash
+    ollama pull llama3.1:70b
+    ```
+  </Card>
+
+  <Card title="Gemma 2 27B" icon="bolt">
+    Fast and efficient, 16GB+ VRAM
+    ```bash
+    ollama pull gemma2:27b
+    ```
+  </Card>
+
+  <Card title="Mistral Large" icon="gauge">
+    Balanced performance, 32GB VRAM
+    ```bash
+    ollama pull mistral-large
+    ```
+  </Card>
+</CardGroup>
+
+## Concurrency Settings
+
+Local models have different concurrency limits than cloud APIs. From `configs/guantanamo/config.yaml:50-55`:
+
+```yaml
+performance:
+  concurrency:
+    extract_workers: 8        # parallel articles in extraction phase
+    extract_per_article: 4    # parallel entity types within article
+    llm_in_flight: 16         # max concurrent cloud LLM calls
+    ollama_in_flight: 2       # max concurrent Ollama calls (local mode)
+```
+
+<Tip>
+  **Local mode uses `ollama_in_flight: 2`** to avoid overloading GPU memory. Adjust based on your VRAM:
+  - 16GB VRAM: `ollama_in_flight: 1`
+  - 24GB VRAM: `ollama_in_flight: 2` (default)
+  - 48GB+ VRAM: `ollama_in_flight: 4`
+</Tip>
+
+The concurrency settings are loaded from `src/process_and_extract.py:798-809`:
+
+```python
+cc = config.get_concurrency_config()
+configure_llm_concurrency(
+    cloud_in_flight=cc["llm_in_flight"] if model_type == "gemini" else None,
+    local_in_flight=cc["ollama_in_flight"] if model_type == "ollama" else None,
+)
+```
+
+## Model Name Handling
+
+Ollama API expects bare model names without the `ollama/` prefix. Hinbox automatically strips it via `src/constants.py:20-22`:
+
+```python
+def get_ollama_model_name(model: str) -> str:
+    """Strip 'ollama/' prefix if present for Ollama API calls."""
+    return model.replace("ollama/", "") if model.startswith("ollama/") else model
+```
+
+This means:
+- **Config**: `HINBOX_OLLAMA_MODEL=ollama/qwen2.5:32b-instruct-q5_K_M`
+- **API call**: `qwen2.5:32b-instruct-q5_K_M`
+
+## Performance Considerations
+
+### GPU Memory Requirements
+
+| Model Size | Quantization | VRAM Required | Typical Speed |
+|------------|--------------|---------------|---------------|
+| 7B         | Q5_K_M       | 6GB           | ~50 tok/s     |
+| 13B        | Q5_K_M       | 10GB          | ~30 tok/s     |
+| 32B        | Q5_K_M       | 24GB          | ~20 tok/s     |
+| 70B        | Q4_K_M       | 48GB          | ~10 tok/s     |
+
+### CPU-Only Mode
+
+Ollama can run on CPU, but extraction will be 10-50x slower:
+
+```bash
+# Force CPU mode
+OLLAMA_DEVICE=cpu ollama serve
+```
+
+<Warning>
+  CPU mode is only practical for small test runs (`--limit 5`). GPU is strongly recommended for production use.
+</Warning>
+
+## Troubleshooting
+
+### Connection Refused
+
+```
+Error: Connection refused to http://localhost:11434/v1
+```
+
+**Solution**: Verify Ollama is running:
+```bash
+pgrep ollama  # Should show a process ID
+ollama list   # Should list downloaded models
+```
+
+Restart if needed:
+```bash
+ollama serve
+```
+
+### Out of Memory
+
+```
+Error: CUDA out of memory
+```
+
+**Solutions**:
+1. Reduce context window: `export OLLAMA_CONTEXT_LENGTH=8192`
+2. Lower concurrency: Set `ollama_in_flight: 1` in config.yaml
+3. Use smaller model: Switch to `qwen2.5:14b` or `gemma2:9b`
+
+### Slow Extraction
+
+**Check GPU utilization**:
+```bash
+nvidia-smi  # Should show ~90%+ GPU usage during extraction
+```
+
+If GPU usage is low:
+- Increase `ollama_in_flight` (if you have VRAM headroom)
+- Verify context window isn't too large
+- Check CPU bottlenecks with `htop`
+
+## Cloud vs. Local Comparison
+
+| Aspect           | Cloud (Gemini)          | Local (Ollama)           |
+|------------------|-------------------------|---------------------------|
+| **Cost**         | ~$0.50-2 per 1000 docs  | Free (electricity only)   |
+| **Privacy**      | Data sent to Google     | 100% local                |
+| **Speed**        | ~2-5 docs/sec           | ~0.5-2 docs/sec (GPU)     |
+| **Setup**        | API key only            | GPU, model download       |
+| **Quality**      | Excellent               | Excellent (32B+ models)   |
+| **Internet**     | Required                | Not required              |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Privacy Mode" icon="lock" href="/advanced/privacy-mode">
+    Learn how `--local` enforces complete data privacy
+  </Card>
+  <Card title="Performance Tuning" icon="gauge" href="/advanced/performance">
+    Optimize concurrency and batching settings
+  </Card>
+  <Card title="Quality Controls" icon="shield-check" href="/advanced/quality-controls">
+    Understand extraction QC and retry logic
+  </Card>
+  <Card title="Caching" icon="database" href="/advanced/caching">
+    Avoid redundant LLM calls with extraction cache
+  </Card>
+</CardGroup>

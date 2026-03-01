@@ -1,0 +1,272 @@
+---
+title: EntityExtractor
+description: Unified entity extraction API supporting cloud (Gemini) and local (Ollama) models
+---
+
+## Overview
+
+The `EntityExtractor` class provides a unified interface for extracting entities from text using either cloud-based (Gemini) or local (Ollama) models. It eliminates code duplication by supporting all four entity types through a single generic implementation.
+
+## Class Definition
+
+```python
+from src.engine.extractors import EntityExtractor
+
+extractor = EntityExtractor(entity_type: str, domain: str = "guantanamo")
+```
+
+### Constructor Parameters
+
+<ParamField path="entity_type" type="str" required>
+  The type of entity to extract. Supported values:
+  - `"people"` - Person entities
+  - `"organizations"` - Organization entities  
+  - `"locations"` - Location entities
+  - `"events"` - Event entities
+</ParamField>
+
+<ParamField path="domain" type="str" default="guantanamo">
+  The domain configuration to use. Determines which prompts and schemas are loaded.
+</ParamField>
+
+### Raises
+
+- `ValueError` - If `entity_type` is not one of the supported values
+
+---
+
+## Methods
+
+### extract_cloud()
+
+Extract entities using cloud-based models (Gemini via Google AI).
+
+```python
+entities = extractor.extract_cloud(
+    text: str,
+    model: str = CLOUD_MODEL,
+    temperature: float = 0,
+    repair_hint: Optional[str] = None
+) -> List[Dict[str, Any]]
+```
+
+<ParamField path="text" type="str" required>
+  The article text to extract entities from
+</ParamField>
+
+<ParamField path="model" type="str" default="CLOUD_MODEL">
+  The cloud model to use (defaults to `gemini-2.0-flash-exp`)
+</ParamField>
+
+<ParamField path="temperature" type="float" default="0">
+  Sampling temperature for generation (0 = deterministic)
+</ParamField>
+
+<ParamField path="repair_hint" type="Optional[str]" default="None">
+  Optional suffix appended to the system prompt on retry attempts. Used by QC retry logic to guide the model toward fixing specific issues (e.g., "avoid generic names").
+</ParamField>
+
+<ResponseField name="return" type="List[Dict[str, Any]]">
+  List of extracted entities as dictionaries with type-specific fields
+</ResponseField>
+
+#### Example
+
+```python
+from src.engine.extractors import EntityExtractor
+
+extractor = EntityExtractor("people", domain="guantanamo")
+
+text = """
+Major General Geoffrey Miller was appointed commander of 
+Joint Task Force Guantanamo in November 2002.
+"""
+
+people = extractor.extract_cloud(
+    text=text,
+    model="gemini-2.0-flash-exp",
+    temperature=0
+)
+
+# Returns:
+# [
+#   {
+#     "name": "Geoffrey Miller",
+#     "alternative_names": ["Major General Geoffrey Miller"],
+#     "aliases": []
+#   }
+# ]
+```
+
+---
+
+### extract_local()
+
+Extract entities using local models (Ollama with structured output via Instructor).
+
+```python
+entities = extractor.extract_local(
+    text: str,
+    model: str = OLLAMA_MODEL,
+    temperature: float = 0,
+    repair_hint: Optional[str] = None
+) -> List[Dict[str, Any]]
+```
+
+<ParamField path="text" type="str" required>
+  The article text to extract entities from
+</ParamField>
+
+<ParamField path="model" type="str" default="OLLAMA_MODEL">
+  The local model to use (defaults to `llama3.3:70b-instruct-q8_0`)
+</ParamField>
+
+<ParamField path="temperature" type="float" default="0">
+  Sampling temperature for generation (0 = deterministic)
+</ParamField>
+
+<ParamField path="repair_hint" type="Optional[str]" default="None">
+  Optional suffix appended to the system prompt on retry. See `extract_cloud()` for details.
+</ParamField>
+
+<ResponseField name="return" type="List[Dict[str, Any]]">
+  List of extracted entities as dictionaries
+</ResponseField>
+
+<Note>
+  Uses the same `List[Entity]` response model as cloud extraction so prompts (which teach bare JSON arrays) parse correctly in both modes.
+</Note>
+
+---
+
+### extract()
+
+Convenience method that routes to either `extract_cloud()` or `extract_local()` based on model type.
+
+```python
+entities = extractor.extract(
+    text: str,
+    model_type: str = "gemini",
+    model: str = None,
+    temperature: float = 0
+) -> List[Dict[str, Any]]
+```
+
+<ParamField path="text" type="str" required>
+  The article text to extract entities from
+</ParamField>
+
+<ParamField path="model_type" type="str" default="gemini">
+  Either `"gemini"` for cloud or `"ollama"` for local
+</ParamField>
+
+<ParamField path="model" type="Optional[str]" default="None">
+  Specific model to use. If `None`, uses the appropriate default for the model type.
+</ParamField>
+
+<ParamField path="temperature" type="float" default="0">
+  Sampling temperature for generation
+</ParamField>
+
+<ResponseField name="return" type="List[Dict[str, Any]]">
+  List of extracted entities as dictionaries
+</ResponseField>
+
+#### Example
+
+```python
+extractor = EntityExtractor("organizations", domain="guantanamo")
+
+# Cloud extraction
+orgs_cloud = extractor.extract(
+    text=article_text,
+    model_type="gemini"
+)
+
+# Local extraction
+orgs_local = extractor.extract(
+    text=article_text,
+    model_type="ollama"
+)
+```
+
+---
+
+## Entity Type Configuration
+
+The extractor internally maps entity types to their Pydantic models and list attribute names:
+
+```python
+ENTITY_MODEL_GETTERS = {
+    "people": get_person_model,
+    "organizations": get_organization_model,
+    "locations": get_location_model,
+    "events": get_event_model,
+}
+
+ENTITY_LIST_ATTRIBUTES = {
+    "people": "people",
+    "organizations": "organizations",
+    "locations": "locations",
+    "events": "events",
+}
+```
+
+Models are loaded dynamically from `configs/<domain>/types/` using the domain configuration system.
+
+---
+
+## Convenience Factory Functions
+
+For backward compatibility, entity-specific factory functions are provided:
+
+```python
+from src.engine.extractors import (
+    create_people_extractor,
+    create_organizations_extractor,
+    create_locations_extractor,
+    create_events_extractor
+)
+
+people_extractor = create_people_extractor(domain="guantanamo")
+org_extractor = create_organizations_extractor(domain="guantanamo")
+loc_extractor = create_locations_extractor(domain="guantanamo")
+event_extractor = create_events_extractor(domain="guantanamo")
+```
+
+<Expandable title="Implementation Details">
+  Each factory function simply returns `EntityExtractor(entity_type, domain)` with the appropriate type:
+  
+  ```python
+  def create_people_extractor(domain: str = "guantanamo") -> EntityExtractor:
+      return EntityExtractor("people", domain)
+  ```
+</Expandable>
+
+---
+
+## Integration with QC Retry
+
+The `repair_hint` parameter enables single-attempt retry when extraction quality control detects severe issues:
+
+```python
+# First attempt
+raw_entities = extractor.extract_cloud(text=article_text)
+cleaned, qc_report = run_extraction_qc("people", raw_entities, domain)
+
+# Retry with repair hint if QC flags issues
+if should_retry_extraction(qc_report.flags):
+    hint = build_repair_hint("people", qc_report.flags)
+    raw_entities_v2 = extractor.extract_cloud(
+        text=article_text,
+        repair_hint=hint  # Guides model to fix specific issues
+    )
+```
+
+See [ArticleProcessor](/api/engine/article-processor) for the full retry orchestration logic.
+
+---
+
+## Source Location
+
+`~/workspace/source/src/engine/extractors.py`

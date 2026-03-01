@@ -1,0 +1,426 @@
+---
+title: Web Interface
+description: Browse and explore extracted entities using the FastHTML web interface
+---
+
+Hinbox includes a local web interface for browsing and exploring extracted entities. The interface provides filtering, search, and detailed entity views with profile information and source citations.
+
+## Starting the Web Interface
+
+Launch the web interface:
+
+```bash
+just frontend
+```
+
+The interface will be available at **http://localhost:5001**
+
+<Note>
+  You can also use the aliases `just web` or `just ui` to start the interface.
+</Note>
+
+## Interface Overview
+
+The web interface consists of several main sections:
+
+### Home Page
+
+The home page (`/`) displays:
+- Entity count cards for each type (People, Events, Locations, Organizations)
+- Quick navigation to browse each entity type
+- Domain selector dropdown (if multiple domains configured)
+
+### Entity List Pages
+
+Each entity type has a dedicated list page:
+
+- `/people` - Browse all people
+- `/organizations` - Browse all organizations
+- `/locations` - Browse all locations
+- `/events` - Browse all events
+
+### Entity Detail Pages
+
+Detailed views for individual entities:
+
+- `/people/{name}` - Person profile and articles
+- `/organizations/{name}` - Organization details
+- `/locations/{name}` - Location information
+- `/events/{title}` - Event details
+
+## Browsing Entities
+
+### People Page
+
+The People page shows all extracted individuals with:
+
+**Filter Panel** (left sidebar):
+- **Search**: Filter by name
+- **Type filters**: Filter by person type (detainee, lawyer, journalist, etc.)
+- **Tag filters**: Filter by profile tags (civil_rights, intelligence, medical, etc.)
+
+**Entity List** (main area):
+- Person name (clickable link to detail page)
+- Type badge showing person category
+- Tag badges showing additional classifications
+- Article count
+
+### Organizations Page
+
+Similar layout with organization-specific filters:
+
+**Filter Panel**:
+- **Search**: Filter by organization name
+- **Type filters**: military, intelligence, legal, humanitarian, etc.
+
+**Entity List**:
+- Organization name and type
+- Aliases (alternative names/acronyms)
+- Article count
+
+### Locations Page
+
+**Filter Panel**:
+- **Search**: Filter by location name
+- **Type filters**: detention_facility, military_base, country, city, etc.
+
+**Entity List**:
+- Location name and type
+- Article count
+
+### Events Page
+
+**Filter Panel**:
+- **Search**: Filter by event title
+- **Type filters**: detention, legal, military_operation, policy_change, etc.
+- **Tag filters**: Filter by event tags
+
+**Entity List**:
+- Event title and date
+- Type and tag badges
+- Article count
+
+## Entity Detail Pages
+
+Clicking any entity opens a detailed view with:
+
+### Header Section
+
+- **Breadcrumb**: Back link to entity list
+- **Entity name/title**: Main heading
+- **Type badge**: Entity category
+- **Version selector**: View historical profile versions (if enabled)
+
+### Profile Section
+
+**Aliases**:
+- Alternative names and acronyms
+- Automatically extracted variants
+
+Example for "Department of Defense":
+- Defense Department
+- DoD
+- Pentagon
+
+**Profile Tags**:
+- Additional categorizations beyond the main type
+- Multiple tags can be assigned to one entity
+
+Example for a person:
+- civil_rights
+- activist
+- legal
+
+**Profile Text**:
+- Narrative description synthesized from source articles
+- Includes citations to source articles
+- Written in paragraph form (not bullet points)
+
+Example profile excerpt:
+```
+Carol Rosenberg is a journalist who has covered Guantánamo Bay detention
+operations since 2002^[article_123, article_456]. She works for the
+Miami Herald and has reported extensively on detainee transfers and
+legal proceedings^[article_789].
+```
+
+**Confidence Badge**:
+- Shows extraction confidence (High, Medium, Low)
+- Based on source quality and consistency
+
+### Articles Section
+
+List of source articles that mention this entity:
+
+- Article title (clickable link)
+- Publication date
+- Source URL
+- Short excerpt showing entity mention
+
+Sorted by publication date (most recent first).
+
+## Multi-Domain Support
+
+### Domain Selector
+
+If you have multiple research domains configured, a domain selector appears in the top-right corner of every page.
+
+**Single domain**: Shows domain name as a label
+
+**Multiple domains**: Shows dropdown to switch between domains
+
+Switching domains:
+1. Click the domain dropdown
+2. Select a different domain
+3. Page reloads with the selected domain's entities
+
+All links include the current domain parameter (`?domain=guantanamo`).
+
+### Domain-Specific Data
+
+Each domain has its own:
+- Entity types and categories
+- Extraction results
+- Configuration settings
+
+The web interface dynamically loads entity types from each domain's configuration.
+
+## Filtering and Search
+
+### Text Search
+
+Enter a search term in the search box to filter by name/title:
+- Case-insensitive partial matching
+- Filters as you type
+- Works across all entity attributes
+
+### Type Filters
+
+Click type filter chips to show only entities of specific types:
+- Multiple types can be selected (OR logic)
+- Active filters shown with highlighted styling
+- Click again to deselect
+
+### Tag Filters
+
+(Available for People and Events)
+
+Click tag filter chips to filter by profile tags:
+- Multiple tags can be selected (OR logic)
+- Entity must have at least one selected tag
+- Combines with type and search filters
+
+### Combined Filtering
+
+All filters work together:
+- Search + Type + Tags = Show entities matching ALL criteria
+- Multiple selections within a filter type use OR logic
+- Filters across types use AND logic
+
+Example:
+```
+Search: "rosenberg"
+Type: journalist OR lawyer
+Tag: civil_rights
+
+Result: Shows journalists OR lawyers named "rosenberg" who have the civil_rights tag
+```
+
+## Profile Versioning
+
+If profile versioning is enabled (`ENABLE_PROFILE_VERSIONING = True`), entity detail pages show a version selector.
+
+### Version Selector Dropdown
+
+Select from available profile versions:
+- **v3 (current)** - Most recent version
+- **v2** - Previous version with timestamp
+- **v1** - Initial version
+
+Each version shows:
+- Profile text at that point in time
+- Articles that were included
+- Tags assigned in that version
+
+### Version Comparison
+
+Compare how an entity's profile evolved:
+1. Open entity detail page
+2. Use version selector to view different versions
+3. Observe changes in profile text, tags, and article citations
+
+Useful for:
+- Tracking how understanding evolved
+- Verifying profile accuracy
+- Understanding source coverage over time
+
+## Design and Styling
+
+The interface uses the "Archival Elegance" design system:
+
+**Typography**:
+- Headings: Crimson Pro (serif)
+- Body: IBM Plex Sans (sans-serif)
+
+**Colors**:
+- Primary: Warm teal-slate (#2c5f7c)
+- Accent: Amber (#c97b3a)
+- Neutral: Soft cream and warm grays
+
+**Layout**:
+- Fixed-width filter panel (220px)
+- Flexible content area
+- Responsive spacing and typography
+
+## Technical Details
+
+### FastHTML Framework
+
+The web interface is built with [FastHTML](https://www.fastht.ml/), a Python framework for building web applications:
+
+**Route Structure** (`src/frontend/routes/`):
+```python
+# Home page
+@rt("/")
+def get_home(domain: str = None, request=None):
+    # Returns entity count cards
+
+# People list
+@rt("/people")
+def get_people(domain: str = None, q: str = "", request=None):
+    # Returns filtered people list
+
+# Person detail
+@rt("/people/{key:path}")
+def get_person(key: str, domain: str = None, version: int = None):
+    # Returns person detail page with profile
+```
+
+**Data Loading** (`src/frontend/data_access.py`):
+```python
+def get_domain_data(domain: str) -> Dict[str, Any]:
+    """Load entity Parquet files for a domain."""
+    # Reads people.parquet, organizations.parquet, etc.
+    # Builds indexes for fast lookups
+    # Returns dict with all entity types
+```
+
+**Components** (`src/frontend/components.py`):
+- `AliasesDisplay`: Shows alternative names
+- `TagsDisplay`: Renders tag badges
+- `ConfidenceBadge`: Shows confidence level
+- `ProfileVersionSelector`: Version dropdown
+
+### Data Flow
+
+1. User navigates to entity page
+2. Route handler loads domain configuration
+3. Data access layer reads Parquet files
+4. Filters are applied to entity list
+5. Components render HTML
+6. Browser displays page
+
+No database required - all data loaded from Parquet files on demand.
+
+## Customization
+
+### Custom Styling
+
+Edit `src/frontend/static/styles.css` to customize appearance:
+
+```css
+:root {
+  --primary: #2c5f7c;      /* Main color */
+  --accent: #c97b3a;       /* Accent color */
+  --background: #f9f7f4;   /* Page background */
+  --card: #ffffff;         /* Card background */
+}
+```
+
+### Adding Routes
+
+Add new routes in `src/frontend/routes/`:
+
+```python
+from ..app_config import rt
+
+@rt("/my-page")
+def get_my_page():
+    return Div(
+        H1("My Custom Page"),
+        P("Content here")
+    )
+```
+
+### Custom Components
+
+Add components in `src/frontend/components.py`:
+
+```python
+def MyComponent(text: str, cls: str = ""):
+    """Custom component."""
+    return Div(
+        Span(text),
+        cls=f"my-component {cls}"
+    )
+```
+
+## Troubleshooting
+
+### Port Already in Use
+
+**Error**: `Address already in use: 5001`
+
+**Solution**: Kill the existing process or change the port:
+```python
+# In src/frontend/__main__.py
+if __name__ == "__main__":
+    serve(port=5002)  # Use different port
+```
+
+### No Entities Showing
+
+**Problem**: Entity list pages are empty
+
+**Solutions**:
+1. Verify entities were extracted: `ls data/your_domain/entities/`
+2. Check Parquet files exist and contain data
+3. Verify domain parameter matches directory name
+4. Check console for errors
+
+### Filters Not Working
+
+**Problem**: Filters don't affect entity list
+
+**Solutions**:
+1. Check browser console for JavaScript errors
+2. Verify filter parameters in URL
+3. Ensure entity types match category definitions
+4. Clear browser cache
+
+### Profile Not Displaying
+
+**Problem**: Entity detail page missing profile text
+
+**Solutions**:
+1. Verify entity has profile data in Parquet file
+2. Check profile generation was enabled during processing
+3. Ensure Markdown rendering is working
+4. Look for errors in server logs
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Processing Articles" href="/guides/processing-articles">
+    Extract more entities to browse
+  </Card>
+  <Card title="Creating Domains" href="/guides/creating-domains">
+    Configure additional research domains
+  </Card>
+  <Card title="Configuration" href="/guides/configuration">
+    Customize interface and processing settings
+  </Card>
+  <Card title="Data Format" href="/guides/data-format">
+    Understand the underlying data structure
+  </Card>
+</CardGroup>
