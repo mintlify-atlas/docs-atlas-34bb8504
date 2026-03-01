@@ -1,0 +1,106 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "Hinbox",
+  "projectDescription": "A flexible, domain-configurable entity extraction system designed for historians and researchers",
+  "theme": "maple",
+  "primaryColor": "#2563eb",
+  "lightColor": "#60a5fa",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/pipeline",
+              "concepts/entities",
+              "concepts/domains"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/creating-domains",
+              "guides/processing-articles",
+              "guides/web-interface",
+              "guides/configuration",
+              "guides/data-format"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/local-models",
+              "advanced/privacy-mode",
+              "advanced/performance",
+              "advanced/quality-controls",
+              "advanced/caching"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "CLI",
+            "pages": [
+              "api/cli/process",
+              "api/cli/domain-management",
+              "api/cli/data-management"
+            ]
+          },
+          {
+            "group": "Engine",
+            "pages": [
+              "api/engine/extractors",
+              "api/engine/mergers",
+              "api/engine/profiles",
+              "api/engine/article-processor"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/utils/embeddings",
+              "api/utils/quality-controls",
+              "api/utils/cache"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Domain-configurable entity extraction for historical research",
+    "Multi-model AI support (cloud Gemini and local Ollama via LiteLLM)",
+    "Smart deduplication with RapidFuzz lexical blocking and embedding similarity",
+    "Profile versioning and citation-backed grounding",
+    "Privacy mode with local-only embeddings and no telemetry",
+    "Parallel extraction pipeline with quality controls and caching",
+    "FastHTML web interface with archival elegance design",
+    "Merge dispute resolution with second-stage LLM arbitration"
+  ],
+  "publicApiSurface": [
+    "process-domain - Process articles for a specific research domain",
+    "init - Initialize a new research domain configuration",
+    "frontend - Start the FastHTML web interface",
+    "EntityExtractor - Unified cloud/local entity extraction",
+    "EntityMerger - Deduplication with lexical blocking and embeddings",
+    "ArticleProcessor - Relevance, extraction, and QC orchestration",
+    "VersionedProfile - Profile history management",
+    "EmbeddingManager - Cloud/local embedding providers",
+    "DomainConfig - Domain configuration loader"
+  ]
+}
